@@ -5,23 +5,32 @@ const getNotifications = async (req, res) => {
   try {
     const pool = await poolPromise;
     const userId = req.user.userId;
-
-    const result = await pool.request()
-      .input('user_id', sql.Int, userId)
-      .query(`
-        SELECT 
-          notification_id, 
-          user_id, 
-          type, 
-          message, 
-          created_at, 
-          is_read
-        FROM Notifications
-        WHERE user_id = @user_id
-        ORDER BY created_at DESC
-      `);
-
-    console.log('📊 Notifications from DB:', result.recordset);
+    const customerId = req.user.customerId;
+    
+    let result;
+    
+    if (customerId) {
+      // Customer logged in - get notifications by customer_id
+      result = await pool.request()
+        .input('customer_id', sql.Int, customerId)
+        .query(`
+          SELECT notification_id, customer_id as user_id, type, message, created_at, is_read
+          FROM Notifications
+          WHERE customer_id = @customer_id
+          ORDER BY created_at DESC
+        `);
+    } else {
+      // User/Admin logged in - get notifications by user_id
+      result = await pool.request()
+        .input('user_id', sql.Int, userId)
+        .query(`
+          SELECT notification_id, user_id, type, message, created_at, is_read
+          FROM Notifications
+          WHERE user_id = @user_id
+          ORDER BY created_at DESC
+        `);
+    }
+    
     res.json(result.recordset);
   } catch (err) {
     console.error('Error in getNotifications:', err);

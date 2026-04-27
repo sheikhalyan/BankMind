@@ -14,13 +14,14 @@ const depositMoney = async (req, res) => {
   try {
     const pool = await poolPromise;
 
-    // 1️⃣ Check account
+    // Get account and customer details
     const accountResult = await pool
       .request()
       .input("account_id", sql.Int, account_id).query(`
-        SELECT status
-        FROM Accounts
-        WHERE account_id = @account_id
+        SELECT a.status, a.balance, a.customer_id, c.customer_name, c.email
+        FROM Accounts a
+        INNER JOIN Customers c ON a.customer_id = c.customer_id
+        WHERE a.account_id = @account_id
       `);
 
     const account = accountResult.recordset[0];
@@ -33,7 +34,7 @@ const depositMoney = async (req, res) => {
       return res.status(403).json({ message: "Account is not active" });
     }
 
-    // 2️⃣ Update balance
+    // Update balance
     await pool
       .request()
       .input("amount", sql.Decimal(10, 2), amount)
@@ -43,7 +44,7 @@ const depositMoney = async (req, res) => {
         WHERE account_id = @account_id
       `);
 
-    // 3️⃣ Insert transaction (✅ FIXED)
+    // Insert transaction
     await pool
       .request()
       .input("account_id", sql.Int, account_id)
@@ -54,38 +55,29 @@ const depositMoney = async (req, res) => {
         (@account_id, 'CREDIT', 'DEPOSIT', @amount)
       `);
 
-    // // ✅ Notify customer about deposit
-    // await createNotification(
-    //   account.customer_id,
-    //   "DEPOSIT",
-    //   `$${amount} has been deposited into your account (Account #${account_id})`,
-    //   account_id,
-    // );
-
-    // Inside depositMoney function, after successful deposit
+    // Create notification directly for customer using customer_id
     console.log(
-      "🔵 Attempting to create notification for customer:",
+      "✅ Creating notification for customer ID:",
       account.customer_id,
     );
-    console.log("🔵 createNotification function:", typeof createNotification);
 
-    // ✅ Correct - includes pool parameter
-    const notificationResult = await createNotification(
-      pool, // 👈 Add pool as first parameter
-      account.customer_id,
+    await createNotification(
+      pool,
+      null, // no user_id
+      account.customer_id, // customer_id
       "DEPOSIT",
       `$${amount} has been deposited into your account (Account #${account_id})`,
       account_id,
     );
 
-    console.log("🔵 Notification result:", notificationResult);
+    console.log("✅ Notification created successfully");
 
-    res.json({ message: "Deposit successful" });
+    res.json({ message: "Deposit successful", amount: amount });
   } catch (err) {
+    console.error("Deposit error:", err);
     res.status(500).json({ error: err.message });
   }
 };
-
 /* =========================
    CUSTOMER: WITHDRAW MONEY
 ========================= */
@@ -100,16 +92,17 @@ const withdrawMoney = async (req, res) => {
   try {
     const pool = await poolPromise;
 
-    // 1️⃣ Verify account ownership + active status
+    // 1️⃣ Verify account ownership + active status and get associated user
     const accountResult = await pool
       .request()
       .input("account_id", sql.Int, account_id)
       .input("customer_id", sql.Int, customerId).query(`
-        SELECT balance
-        FROM Accounts
-        WHERE account_id = @account_id
-          AND customer_id = @customer_id
-          AND status = 'ACTIVE'
+        SELECT a.balance, c.approved_by_user
+        FROM Accounts a
+        INNER JOIN Customers c ON a.customer_id = c.customer_id
+        WHERE a.account_id = @account_id
+          AND a.customer_id = @customer_id
+          AND a.status = 'ACTIVE'
       `);
 
     if (accountResult.recordset.length === 0) {
@@ -119,6 +112,7 @@ const withdrawMoney = async (req, res) => {
     }
 
     const currentBalance = accountResult.recordset[0].balance;
+    const associatedUserId = accountResult.recordset[0].approved_by_user;
 
     // 2️⃣ Check sufficient balance
     if (currentBalance < amount) {
@@ -130,14 +124,14 @@ const withdrawMoney = async (req, res) => {
     // 3️⃣ Deduct balance
     await pool
       .request()
-      .input("account_id", sql.Int, account_id)
-      .input("amount", sql.Decimal(10, 2), amount).query(`
+      .input("amount", sql.Decimal(10, 2), amount)
+      .input("account_id", sql.Int, account_id).query(`
         UPDATE Accounts
         SET balance = balance - @amount
         WHERE account_id = @account_id
       `);
 
-    // 4️⃣ Insert transaction (✅ FIXED)
+    // 4️⃣ Insert transaction
     await pool
       .request()
       .input("account_id", sql.Int, account_id)
@@ -148,15 +142,25 @@ const withdrawMoney = async (req, res) => {
         (@account_id, 'DEBIT', 'WITHDRAW', @amount)
       `);
 
-    // ✅ Notify associated user about withdrawal
-    const associatedUser = accountResult.recordset[0].approved_by_user;
-    if (associatedUser) {
+    // 5️⃣ Notify associated user about withdrawal
+    if (associatedUserId) {
+      console.log(
+        "✅ Creating notification for associated user:",
+        associatedUserId,
+      );
+
       await createNotification(
-        associatedUser,
+        pool,
+        associatedUserId, // user_id
+        null, // no customer_id
         "WITHDRAWAL",
         `Customer withdrew $${amount} from account #${account_id}`,
         account_id,
       );
+
+      console.log("✅ Notification created successfully");
+    } else {
+      console.log("⚠️ No associated user found for this customer");
     }
 
     res.json({
@@ -164,35 +168,44 @@ const withdrawMoney = async (req, res) => {
       withdrawn_amount: amount,
     });
   } catch (err) {
+    console.error("Withdrawal error:", err);
     res.status(500).json({ error: err.message });
   }
 };
-
 /* =========================
    CUSTOMER: TRANSFER MONEY
 ========================= */
 
 const transferMoney = async (req, res) => {
-  const { sender_account_id, receiver_account_id, amount } = req.body;
+  // Accept both naming conventions
+  const sender_account_id = req.body.sender_account_id || req.body.from_account_id || req.body.fromAccountId;
+  const receiver_account_id = req.body.receiver_account_id || req.body.to_account_number || req.body.toAccountNumber;
+  const amount = req.body.amount;
+  
+  console.log("📊 Parsed values:", { sender_account_id, receiver_account_id, amount });
+  
   const customerId = req.user.customerId;
 
   if (!sender_account_id || !receiver_account_id || !amount || amount <= 0) {
+    console.log("❌ Invalid transfer data - missing fields");
     return res.status(400).json({ message: "Invalid transfer data" });
   }
 
   try {
     const pool = await poolPromise;
 
-    // 1️⃣ Verify sender account ownership + ACTIVE
+    // 1️⃣ Verify sender account ownership + ACTIVE and get associated user
     const senderResult = await pool
       .request()
       .input("sender_account_id", sql.Int, sender_account_id)
-      .input("customer_id", sql.Int, customerId).query(`
-        SELECT balance
-        FROM Accounts
-        WHERE account_id = @sender_account_id
-          AND customer_id = @customer_id
-          AND status = 'ACTIVE'
+      .input("customer_id", sql.Int, customerId)
+      .query(`
+        SELECT a.balance, a.customer_id, c.customer_name, c.approved_by_user
+        FROM Accounts a
+        INNER JOIN Customers c ON a.customer_id = c.customer_id
+        WHERE a.account_id = @sender_account_id
+          AND a.customer_id = @customer_id
+          AND a.status = 'ACTIVE'
       `);
 
     if (senderResult.recordset.length === 0) {
@@ -202,6 +215,9 @@ const transferMoney = async (req, res) => {
     }
 
     const senderBalance = senderResult.recordset[0].balance;
+    const senderCustomerId = senderResult.recordset[0].customer_id;
+    const senderCustomerName = senderResult.recordset[0].customer_name;
+    const associatedUserId = senderResult.recordset[0].approved_by_user;
 
     // 2️⃣ Check sufficient balance
     if (senderBalance < amount) {
@@ -210,14 +226,16 @@ const transferMoney = async (req, res) => {
         .json({ message: "Insufficient balance in sender account" });
     }
 
-    // 3️⃣ Verify receiver account exists + ACTIVE
+    // 3️⃣ Verify receiver account exists + ACTIVE and get receiver info
     const receiverResult = await pool
       .request()
-      .input("receiver_account_id", sql.Int, receiver_account_id).query(`
-        SELECT status
-        FROM Accounts
-        WHERE account_id = @receiver_account_id
-          AND status = 'ACTIVE'
+      .input("receiver_account_id", sql.Int, receiver_account_id)
+      .query(`
+        SELECT a.customer_id, c.customer_name
+        FROM Accounts a
+        INNER JOIN Customers c ON a.customer_id = c.customer_id
+        WHERE a.account_id = @receiver_account_id
+          AND a.status = 'ACTIVE'
       `);
 
     if (receiverResult.recordset.length === 0) {
@@ -226,11 +244,15 @@ const transferMoney = async (req, res) => {
         .json({ message: "Receiver account not found or not active" });
     }
 
+    const receiverCustomerId = receiverResult.recordset[0].customer_id;
+    const receiverCustomerName = receiverResult.recordset[0].customer_name;
+
     // 4️⃣ Deduct from sender
     await pool
       .request()
       .input("sender_account_id", sql.Int, sender_account_id)
-      .input("amount", sql.Decimal(10, 2), amount).query(`
+      .input("amount", sql.Decimal(10, 2), amount)
+      .query(`
         UPDATE Accounts
         SET balance = balance - @amount
         WHERE account_id = @sender_account_id
@@ -240,7 +262,8 @@ const transferMoney = async (req, res) => {
     await pool
       .request()
       .input("receiver_account_id", sql.Int, receiver_account_id)
-      .input("amount", sql.Decimal(10, 2), amount).query(`
+      .input("amount", sql.Decimal(10, 2), amount)
+      .query(`
         UPDATE Accounts
         SET balance = balance + @amount
         WHERE account_id = @receiver_account_id
@@ -251,29 +274,58 @@ const transferMoney = async (req, res) => {
       .request()
       .input("sender_account_id", sql.Int, sender_account_id)
       .input("receiver_account_id", sql.Int, receiver_account_id)
-      .input("amount", sql.Decimal(10, 2), amount).query(`
+      .input("amount", sql.Decimal(10, 2), amount)
+      .query(`
         INSERT INTO Transactions (account_id, transaction_type, amount, transaction_reason)
-        VALUES (@sender_account_id, 'DEBIT', @amount, 'TRANSFER')
+        VALUES (@sender_account_id, 'DEBIT', @amount, 'TRANSFER');
 
         INSERT INTO Transactions (account_id, transaction_type, amount, transaction_reason)
         VALUES (@receiver_account_id, 'CREDIT', @amount, 'TRANSFER')
       `);
 
-    // ✅ Notify associated user about transfer
-    const associatedUser = senderResult.recordset[0].approved_by_user;
-    if (associatedUser) {
+    // 7️⃣ Notify SENDER's associated user (the user who manages this customer)
+    if (associatedUserId) {
+      console.log("✅ Creating notification for sender's associated user:", associatedUserId);
+      
       await createNotification(
-        associatedUser,
-        "TRANSFER",
-        `Customer transferred $${amount} from account #${sender_account_id} to account #${receiver_account_id}`,
-        sender_account_id,
+        pool,
+        associatedUserId,
+        null,
+        "TRANSFER_SENT",
+        `${senderCustomerName} transferred $${amount} from account #${sender_account_id} to ${receiverCustomerName}`,
+        sender_account_id
       );
     }
+
+    // 8️⃣ Notify SENDER (customer) about money sent
+    console.log("✅ Creating notification for sender (customer):", senderCustomerId);
+    
+    await createNotification(
+      pool,
+      null,
+      senderCustomerId,
+      "MONEY_SENT",
+      `You sent $${amount} to ${receiverCustomerName} (Account #${receiver_account_id})`,
+      sender_account_id
+    );
+
+    // 9️⃣ Notify RECEIVER (customer) about money received
+    console.log("✅ Creating notification for receiver (customer):", receiverCustomerId);
+    
+    await createNotification(
+      pool,
+      null,
+      receiverCustomerId,
+      "MONEY_RECEIVED",
+      `You received $${amount} from ${senderCustomerName} (Account #${sender_account_id})`,
+      receiver_account_id
+    );
 
     res.json({
       message: `Transfer of ${amount} from account ${sender_account_id} to ${receiver_account_id} successful`,
     });
   } catch (err) {
+    console.error("Transfer error:", err);
     res.status(500).json({ error: err.message });
   }
 };
