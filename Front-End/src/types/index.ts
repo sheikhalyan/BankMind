@@ -31,7 +31,14 @@ export interface Account {
 export interface Transaction {
   id: number;
   accountId: number;
-  type: "deposit" | "withdrawal" | "transfer";
+  type:
+    | "deposit"
+    | "withdrawal"
+    | "transfer"
+    | "CREDIT"
+    | "DEBIT"
+    | "credit"
+    | "debit";
   amount: number;
   fromAccount?: string;
   toAccount?: string;

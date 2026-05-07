@@ -1,5 +1,5 @@
 const { poolPromise, sql } = require("../config/db");
-const { createNotification } = require("../utils/notifications");
+const { createNotification, notifyAdmins } = require("../utils/notifications");
 
 // Get pending users
 const getPendingUsers = async (req, res) => {

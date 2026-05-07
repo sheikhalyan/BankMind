@@ -551,6 +551,7 @@ export default function CustomerDashboard() {
             )}
 
             {/* Transactions Tab */}
+            {/* Transactions Tab */}
             {activeTab === "transactions" && (
               <div>
                 {activeAccounts.length === 0 ? (
@@ -603,77 +604,147 @@ export default function CustomerDashboard() {
                           </p>
                         </div>
                       ) : (
-                        transactions.map((transaction) => (
-                          <div
-                            key={transaction.id}
-                            className="bg-white rounded-xl shadow-sm border p-4 hover:shadow-md transition"
-                          >
-                            <div className="flex justify-between items-start">
-                              <div className="flex items-start space-x-3">
-                                <div
-                                  className={`p-2 rounded-full ${
-                                    transaction.type === "deposit"
-                                      ? "bg-green-100"
-                                      : transaction.type === "withdrawal"
-                                        ? "bg-red-100"
-                                        : "bg-blue-100"
-                                  }`}
-                                >
-                                  {transaction.type === "deposit" ? (
-                                    <ArrowDownLeft
-                                      key={`icon-${transaction.id}-deposit`}
-                                      className="w-5 h-5 text-green-600"
-                                    />
-                                  ) : transaction.type === "withdrawal" ? (
-                                    <ArrowUpRight
-                                      key={`icon-${transaction.id}-withdraw`}
-                                      className="w-5 h-5 text-red-600"
-                                    />
-                                  ) : (
-                                    <Send
-                                      key={`icon-${transaction.id}-transfer`}
-                                      className="w-5 h-5 text-blue-600"
-                                    />
-                                  )}
-                                </div>
-                                <div>
-                                  <h4 className="font-semibold text-gray-900 capitalize">
-                                    {transaction.type}
-                                  </h4>
-                                  <p className="text-sm text-gray-600">
-                                    {transaction.description}
-                                  </p>
-                                  {transaction.type === "transfer" &&
-                                    transaction.toAccount && (
-                                      <p
-                                        key={`to-${transaction.id}`}
-                                        className="text-xs text-gray-500 mt-1"
-                                      >
-                                        To: {transaction.toAccount}
-                                      </p>
-                                    )}
-                                  <p
-                                    key={`time-${transaction.id}`}
-                                    className="text-xs text-gray-500 mt-1"
-                                  >
-                                    {formatDate(transaction.createdAt)}
-                                  </p>
-                                </div>
-                              </div>
+                        <div className="space-y-3">
+                          {transactions.map((transaction: any) => {
+                            const isCredit =
+                              transaction.type === "CREDIT" ||
+                              transaction.type === "credit" ||
+                              transaction.type === "deposit";
+                            const isDebit =
+                              transaction.type === "DEBIT" ||
+                              transaction.type === "debit" ||
+                              transaction.type === "withdrawal";
+
+                            const transactionReason =
+                              transaction.transaction_reason || "Transaction";
+                            const description = transaction.description || "";
+                            const formattedAmount =
+                              transaction.amount.toLocaleString();
+                            const transactionDate = new Date(
+                              transaction.createdAt,
+                            );
+
+                            // Format transaction reason nicely
+                            const getReasonDisplay = () => {
+                              switch (transactionReason.toUpperCase()) {
+                                case "DEPOSIT":
+                                  return "Deposit";
+                                case "WITHDRAW":
+                                  return "Withdrawal";
+                                case "TRANSFER":
+                                  return "Transfer";
+                                default:
+                                  return transactionReason;
+                              }
+                            };
+
+                            // Get color based on transaction type
+                            const getCardColor = () => {
+                              if (isCredit)
+                                return "border-l-4 border-l-green-500";
+                              if (isDebit) return "border-l-4 border-l-red-500";
+                              return "border-l-4 border-l-blue-500";
+                            };
+
+                            return (
                               <div
-                                key={`amount-${transaction.id}`}
-                                className={`text-lg font-bold ${
-                                  transaction.type === "deposit"
-                                    ? "text-green-600"
-                                    : "text-red-600"
-                                }`}
+                                key={transaction.id}
+                                className={`bg-white rounded-xl shadow-sm border hover:shadow-md transition-all duration-200 ${getCardColor()}`}
                               >
-                                {transaction.type === "deposit" ? "+" : "-"}$
-                                {transaction.amount.toFixed(2)}
+                                <div className="p-4">
+                                  <div className="flex justify-between items-start">
+                                    {/* Left side - Icon & Info */}
+                                    <div className="flex items-start space-x-3 flex-1">
+                                      <div
+                                        className={`p-2 rounded-full ${
+                                          isCredit
+                                            ? "bg-green-100"
+                                            : isDebit
+                                              ? "bg-red-100"
+                                              : "bg-blue-100"
+                                        }`}
+                                      >
+                                        {isCredit ? (
+                                          <ArrowDownLeft className="w-5 h-5 text-green-600" />
+                                        ) : isDebit ? (
+                                          <ArrowUpRight className="w-5 h-5 text-red-600" />
+                                        ) : (
+                                          <Send className="w-5 h-5 text-blue-600" />
+                                        )}
+                                      </div>
+                                      <div className="flex-1">
+                                        {/* Date and Transaction Type Badge */}
+                                        <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                          <span
+                                            className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                                              isCredit
+                                                ? "bg-green-100 text-green-700"
+                                                : isDebit
+                                                  ? "bg-red-100 text-red-700"
+                                                  : "bg-blue-100 text-blue-700"
+                                            }`}
+                                          >
+                                            {getReasonDisplay()}
+                                          </span>
+                                          <span className="text-xs text-gray-400">
+                                            •
+                                          </span>
+                                          <span className="text-xs text-gray-500">
+                                            {transactionDate.toLocaleDateString(
+                                              "en-US",
+                                              {
+                                                weekday: "short",
+                                                year: "numeric",
+                                                month: "short",
+                                                day: "numeric",
+                                              },
+                                            )}
+                                          </span>
+                                          <span className="text-xs text-gray-400">
+                                            at
+                                          </span>
+                                          <span className="text-xs text-gray-500">
+                                            {transactionDate.toLocaleTimeString()}
+                                          </span>
+                                        </div>
+
+                                        {/* Detailed Description */}
+                                        {description && (
+                                          <p className="text-sm text-gray-800 mt-2 font-medium">
+                                            {description}
+                                          </p>
+                                        )}
+
+                                        {/* Transaction Reason (if different from description and has value) */}
+                                        {transactionReason &&
+                                          transactionReason !==
+                                            "Transaction" && (
+                                            <p className="text-xs text-gray-400 mt-1">
+                                              Type: {transactionReason}
+                                            </p>
+                                          )}
+
+                                        {/* Transaction ID */}
+                                        <p className="text-xs text-gray-400 mt-2">
+                                          Transaction ID: {transaction.id}
+                                        </p>
+                                      </div>
+                                    </div>
+
+                                    {/* Right side - Amount */}
+                                    <div
+                                      className={`text-right ${isCredit ? "text-green-600" : "text-red-600"}`}
+                                    >
+                                      <p className="text-xl font-bold">
+                                        {isCredit ? "+" : "-"}${formattedAmount}
+                                      </p>
+                                    </div>
+                                  </div>
+                                </div>
                               </div>
-                            </div>
-                          </div>
-                        ))
+                            );
+                          })}
+                        </div>
                       )}
                     </div>
                   </>
