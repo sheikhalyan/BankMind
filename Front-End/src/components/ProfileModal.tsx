@@ -138,6 +138,8 @@ export default function ProfileModal({
     }
   };
 
+  
+
   if (!isOpen) return null;
 
   return (

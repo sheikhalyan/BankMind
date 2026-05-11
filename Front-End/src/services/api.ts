@@ -4,8 +4,16 @@ const getToken = () => localStorage.getItem("token");
 
 export const api = {
   // Base request methods
-  async get(endpoint: string) {
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+  async get(endpoint: string, params?: Record<string, any>) {
+    let url = `${API_BASE_URL}${endpoint}`;
+
+    // Add query parameters if provided
+    if (params) {
+      const queryString = new URLSearchParams(params).toString();
+      url += `?${queryString}`;
+    }
+
+    const response = await fetch(url, {
       headers: {
         Authorization: `Bearer ${getToken()}`,
         "Content-Type": "application/json",
@@ -39,8 +47,19 @@ export const api = {
       },
       body: body ? JSON.stringify(body) : undefined,
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || "Request failed");
+
+    // ✅ FIX: Don't try to parse JSON if response is empty
+    let data = null;
+    const contentType = response.headers.get("content-type");
+    if (contentType && contentType.includes("application/json")) {
+      data = await response.json();
+    }
+
+    if (!response.ok) {
+      throw new Error(data?.message || "Request failed");
+    }
+
+    // ✅ Return data (could be null for empty responses)
     return data;
   },
 
@@ -60,15 +79,15 @@ export const api = {
   // PATCH request - ✅ ADD THIS
   async patch(endpoint: string, body?: any) {
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-      method: 'PATCH',
+      method: "PATCH",
       headers: {
-        'Authorization': `Bearer ${getToken()}`,
-        'Content-Type': 'application/json',
+        Authorization: `Bearer ${getToken()}`,
+        "Content-Type": "application/json",
       },
       body: body ? JSON.stringify(body) : undefined,
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.message || 'Request failed');
+    if (!response.ok) throw new Error(data.message || "Request failed");
     return data;
   },
 
@@ -104,26 +123,30 @@ export const api = {
     },
   },
 
-// Loans endpoints
+  // Loans endpoints
   loans: {
     getByCustomer: async (customerId: number) => {
       return api.get(`/loans/customer/${customerId}`);
     },
-    create: async (data: { amount: number; loanType: string; duration: number }) => {
-      return api.post('/loans/apply', {
+    create: async (data: {
+      amount: number;
+      loanType: string;
+      duration: number;
+    }) => {
+      return api.post("/loans/apply", {
         loan_amount: data.amount,
         loan_type: data.loanType,
-        duration_months: data.duration
+        duration_months: data.duration,
       });
     },
     getPendingLoans: async () => {
-      return api.get('/loan-approval/pending');
+      return api.get("/loan-approval/pending");
     },
     approveLoan: async (loanId: number) => {
       return api.patch(`/loan-approval/approve/${loanId}`); // Now uses PATCH
     },
     rejectLoan: async (loanId: number, reason: string) => {
       return api.patch(`/loan-approval/reject/${loanId}`, { reason }); // Now uses PATCH
-    }
-  }
+    },
+  },
 };

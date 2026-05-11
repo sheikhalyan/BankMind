@@ -374,13 +374,23 @@ export default function UserDashboard() {
   const handleApproveAccount = async (accountId: number) => {
     try {
       await accountService.approve(accountId);
-      setMessage({ type: "success", text: "Account approved successfully" });
+      setMessage({ type: "success", text: "Account approved successfully!" });
       fetchAllData();
+
+      // ✅ Auto-hide message after 3 seconds
+      setTimeout(() => {
+        setMessage({ type: "", text: "" });
+      }, 3000);
     } catch (err: any) {
       setMessage({
         type: "error",
         text: err.message || "Failed to approve account",
       });
+
+      // ✅ Also auto-hide error message after 3 seconds
+      setTimeout(() => {
+        setMessage({ type: "", text: "" });
+      }, 3000);
     }
   };
 
@@ -389,11 +399,19 @@ export default function UserDashboard() {
       await accountService.reject(accountId);
       setMessage({ type: "success", text: "Account rejected" });
       fetchAllData();
+
+      setTimeout(() => {
+        setMessage({ type: "", text: "" });
+      }, 3000);
     } catch (err: any) {
       setMessage({
         type: "error",
         text: err.message || "Failed to reject account",
       });
+
+      setTimeout(() => {
+        setMessage({ type: "", text: "" });
+      }, 3000);
     }
   };
 
@@ -406,11 +424,19 @@ export default function UserDashboard() {
       });
       setShowDeleteConfirm(null);
       fetchAllData();
+
+      setTimeout(() => {
+        setMessage({ type: "", text: "" });
+      }, 3000);
     } catch (err: any) {
       setMessage({
         type: "error",
         text: err.message || "Failed to delete account",
       });
+
+      setTimeout(() => {
+        setMessage({ type: "", text: "" });
+      }, 3000);
     }
   };
 

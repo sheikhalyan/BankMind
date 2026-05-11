@@ -1,5 +1,5 @@
 const { poolPromise, sql } = require("../config/db");
-const { createNotification,notifyAdmins } = require("../utils/notifications");
+const { createNotification, notifyAdmins } = require("../utils/notifications");
 
 /**
  * =========================
@@ -104,33 +104,76 @@ const approveLoan = async (req, res) => {
       userId,
     });
 
-    // If approved_amount and duration_months are not provided, use defaults from policy
-    let finalAmount = approved_amount;
-    let finalDuration = duration_months;
-
     const pool = await poolPromise;
 
-    // First, get the loan policy details
-    const policyResult = await pool.request().input("loanId", sql.Int, loanId)
+    // ✅ FIRST: Get loan and customer info
+    const loanInfoResult = await pool.request().input("loanId", sql.Int, loanId)
       .query(`
-        SELECT p.min_amount, p.max_amount, p.min_months, p.max_months
+        SELECT 
+          l.loan_id,
+          l.customer_id,
+          l.loan_amount as original_amount,
+          lp.policy_id,
+          lp.min_amount,
+          lp.max_amount,
+          lp.min_months,
+          lp.max_months,
+          lp.loan_type,
+          lp.interest_rate,
+          c.customer_name,
+          c.approved_by_user
         FROM Loans l
-        JOIN Loan_Policies p ON l.policy_id = p.policy_id
+        JOIN Loan_Policies lp ON l.policy_id = lp.policy_id
+        JOIN Customers c ON l.customer_id = c.customer_id
         WHERE l.loan_id = @loanId
       `);
 
-    if (policyResult.recordset.length === 0) {
-      return res.status(404).json({ message: "Loan policy not found" });
+    if (loanInfoResult.recordset.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Loan not found",
+      });
     }
 
-    const policy = policyResult.recordset[0];
+    const loanInfo = loanInfoResult.recordset[0];
+
+    // Check if loan is still pending
+    const statusCheck = await pool
+      .request()
+      .input("loanId", sql.Int, loanId)
+      .query(`SELECT status FROM Loans WHERE loan_id = @loanId`);
+
+    if (statusCheck.recordset[0]?.status !== "PENDING") {
+      return res.status(400).json({
+        success: false,
+        message: "Loan already processed",
+      });
+    }
 
     // Use default values if not provided
-    if (!finalAmount) {
-      finalAmount = policy.min_amount;
+    let finalAmount = approved_amount || loanInfo.min_amount;
+    let finalDuration = duration_months || loanInfo.min_months;
+
+    // Validate amount
+    if (
+      finalAmount < loanInfo.min_amount ||
+      finalAmount > loanInfo.max_amount
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: `Approved amount must be between ${loanInfo.min_amount} and ${loanInfo.max_amount}`,
+      });
     }
-    if (!finalDuration) {
-      finalDuration = policy.min_months;
+
+    // Validate duration
+    if (
+      finalDuration < loanInfo.min_months ||
+      finalDuration > loanInfo.max_months
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: `Duration must be between ${loanInfo.min_months} and ${loanInfo.max_months} months`,
+      });
     }
 
     // Calculate dates
@@ -138,7 +181,7 @@ const approveLoan = async (req, res) => {
     const endDate = new Date();
     endDate.setMonth(endDate.getMonth() + parseInt(finalDuration));
 
-    // Update the loan
+    // ✅ SECOND: Update the loan
     const result = await pool
       .request()
       .input("loanId", sql.Int, loanId)
@@ -148,37 +191,59 @@ const approveLoan = async (req, res) => {
       .input("startDate", sql.Date, startDate)
       .input("endDate", sql.Date, endDate).query(`
         UPDATE Loans
-        SET 
+             SET 
           status = 'APPROVED',
           loan_amount = @approved_amount,
-          approved_by_user = @userId,
-          approved_at = GETDATE(),
-          start_date = @startDate,
-          end_date = @endDate
+          approved_by_user = @userId,    -- ✅ CORRECT
+          approved_at = GETDATE(),       -- ✅ CORRECT
+          -- Clear rejection fields
+          rejection_reason = NULL,
+          rejected_by_user = NULL,
+          rejected_at = NULL
         WHERE loan_id = @loanId AND status = 'PENDING'
       `);
 
     if (result.rowsAffected[0] === 0) {
       return res.status(400).json({
+        success: false,
         message: "Loan not found or already processed",
       });
     }
 
-    // ✅ Notify customer about loan approval
+    // ✅ THIRD: Notify customer about loan approval
     await createNotification(
-      loanInfo.recordset[0].customer_id,
+      pool,
+      null,
+      loanInfo.customer_id,
       "LOAN_APPROVED",
-      `Your loan of $${approved_amount} has been APPROVED!`,
+      `Your ${loanInfo.loan_type} loan of $${finalAmount} has been APPROVED! Interest rate: ${loanInfo.interest_rate}%`,
       loanId,
     );
 
-    res.json({
+    // ✅ FOURTH: Notify the user who approved
+    await createNotification(
+      pool,
+      userId,
+      null,
+      "LOAN_REVIEWED",
+      `You APPROVED ${loanInfo.customer_name}'s ${loanInfo.loan_type} loan of $${finalAmount}`,
+      loanId,
+    );
+
+    res.status(200).json({
+      success: true,
       message: "✅ Loan approved successfully",
       approved_by_user: userId,
+      approved_amount: finalAmount,
+      duration_months: finalDuration,
     });
   } catch (err) {
     console.error("❌ Error in approveLoan:", err);
-    res.status(500).json({ message: "Server error", error: err.message });
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: err.message,
+    });
   }
 };
 
@@ -196,13 +261,40 @@ const rejectLoan = async (req, res) => {
     console.log("❌ Rejecting loan:", { loanId, reason, userId });
 
     if (!reason) {
-      return res.status(400).json({ message: "Rejection reason is required" });
+      return res.status(400).json({
+        success: false,
+        message: "Rejection reason is required",
+      });
     }
 
     const pool = await poolPromise;
 
-    // First, check if we need to handle NOT NULL constraints
-    // Update only the columns that exist and allow NULLs
+    // ✅ FIRST: Get loan and customer info
+    const loanInfoResult = await pool.request().input("loanId", sql.Int, loanId)
+      .query(`
+        SELECT 
+          l.loan_id,
+          l.customer_id,
+          l.loan_amount,
+          lp.loan_type,
+          c.customer_name,
+          c.approved_by_user
+        FROM Loans l
+        JOIN Loan_Policies lp ON l.policy_id = lp.policy_id
+        JOIN Customers c ON l.customer_id = c.customer_id
+        WHERE l.loan_id = @loanId
+      `);
+
+    if (loanInfoResult.recordset.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Loan not found",
+      });
+    }
+
+    const loanInfo = loanInfoResult.recordset[0];
+
+    // ✅ SECOND: Update loan - USE CORRECT COLUMNS!
     const result = await pool
       .request()
       .input("loanId", sql.Int, loanId)
@@ -212,33 +304,54 @@ const rejectLoan = async (req, res) => {
         SET 
           status = 'REJECTED',
           rejection_reason = @reason,
-          rejected_by_user = @userId,
-          rejected_at = GETDATE()
-          -- Remove start_date and end_date update if they don't allow NULLs
+          rejected_by_user = @userId,    -- ✅ CORRECT
+          rejected_at = GETDATE(),       -- ✅ CORRECT
+          -- Clear approval fields if they exist
+          approved_by_user = NULL,
+          approved_at = NULL
         WHERE loan_id = @loanId AND status = 'PENDING'
       `);
 
     if (result.rowsAffected[0] === 0) {
       return res.status(400).json({
+        success: false,
         message: "Loan not found or already processed",
       });
     }
 
-    // ✅ Notify customer about loan rejection
+    // ✅ THIRD: Notify customer
     await createNotification(
-      loanInfo.recordset[0].customer_id,
+      pool,
+      null,
+      loanInfo.customer_id,
       "LOAN_REJECTED",
-      `Your loan of $${loanInfo.recordset[0].loan_amount} has been REJECTED. Reason: ${reason}`,
+      `Your ${loanInfo.loan_type} loan of $${loanInfo.loan_amount} has been REJECTED. Reason: ${reason}`,
       loanId,
     );
 
-    res.json({
+    // ✅ FOURTH: Notify the user who rejected
+    await createNotification(
+      pool,
+      userId,
+      null,
+      "LOAN_REVIEWED",
+      `You REJECTED ${loanInfo.customer_name}'s ${loanInfo.loan_type} loan of $${loanInfo.loan_amount}. Reason: ${reason}`,
+      loanId,
+    );
+
+    res.status(200).json({
+      success: true,
       message: "❌ Loan rejected successfully",
       rejected_by_user: userId,
+      reason: reason,
     });
   } catch (err) {
     console.error("❌ Error in rejectLoan:", err);
-    res.status(500).json({ message: "Server error", error: err.message });
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: err.message,
+    });
   }
 };
 
@@ -259,15 +372,25 @@ const deleteRejectedLoan = async (req, res) => {
     // First verify the loan exists and is rejected
     const checkResult = await pool.request().input("loanId", sql.Int, loanId)
       .query(`
-        SELECT status FROM Loans WHERE loan_id = @loanId
+        SELECT l.status, l.customer_id, c.customer_name, lp.loan_type
+        FROM Loans l
+        JOIN Customers c ON l.customer_id = c.customer_id
+        JOIN Loan_Policies lp ON l.policy_id = lp.policy_id
+        WHERE l.loan_id = @loanId
       `);
 
     if (checkResult.recordset.length === 0) {
-      return res.status(404).json({ message: "Loan not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Loan not found",
+      });
     }
 
-    if (checkResult.recordset[0].status !== "REJECTED") {
+    const loanInfo = checkResult.recordset[0];
+
+    if (loanInfo.status !== "REJECTED") {
       return res.status(400).json({
+        success: false,
         message: "Only rejected loans can be deleted",
       });
     }
@@ -278,16 +401,34 @@ const deleteRejectedLoan = async (req, res) => {
       `);
 
     if (result.rowsAffected[0] === 0) {
-      return res.status(400).json({ message: "Failed to delete loan" });
+      return res.status(400).json({
+        success: false,
+        message: "Failed to delete loan",
+      });
     }
 
-    res.json({
+    // Notify that loan was deleted
+    await createNotification(
+      pool,
+      userId,
+      null,
+      "LOAN_DELETED",
+      `You deleted ${loanInfo.customer_name}'s ${loanInfo.loan_type} rejected loan`,
+      loanId,
+    );
+
+    res.status(200).json({
+      success: true,
       message: "✅ Rejected loan deleted successfully",
       deleted_loan_id: loanId,
     });
   } catch (err) {
     console.error("❌ Error in deleteRejectedLoan:", err);
-    res.status(500).json({ message: "Server error", error: err.message });
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: err.message,
+    });
   }
 };
 

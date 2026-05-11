@@ -390,6 +390,7 @@ const transferMoney = async (req, res) => {
 /* =========================
    CUSTOMER: VIEW TRANSACTIONS
 ========================= */
+// GET /api/transactions/account/:accountId
 const getAccountTransactions = async (req, res) => {
   const accountId = parseInt(req.params.account_id);
   const customerId = req.user.customerId;
@@ -402,7 +403,7 @@ const getAccountTransactions = async (req, res) => {
       .request()
       .input("account_id", sql.Int, accountId)
       .input("customer_id", sql.Int, customerId).query(`
-        SELECT account_id
+        SELECT account_id, balance
         FROM Accounts
         WHERE account_id = @account_id
           AND customer_id = @customer_id
@@ -414,7 +415,9 @@ const getAccountTransactions = async (req, res) => {
       });
     }
 
-    // Fetch transactions with proper field mapping
+    const currentBalance = accountCheck.recordset[0].balance;
+
+    // Fetch transactions with running balance
     const transactionsResult = await pool
       .request()
       .input("account_id", sql.Int, accountId).query(`
@@ -424,7 +427,12 @@ const getAccountTransactions = async (req, res) => {
           amount,
           transaction_reason,
           description,
-          transaction_time as createdAt  
+          transaction_time as createdAt,
+          SUM(CASE 
+            WHEN transaction_type = 'CREDIT' THEN amount 
+            WHEN transaction_type = 'DEBIT' THEN -amount 
+            ELSE 0 
+          END) OVER (ORDER BY transaction_time) as running_balance
         FROM Transactions
         WHERE account_id = @account_id
         ORDER BY transaction_time DESC
@@ -432,6 +440,7 @@ const getAccountTransactions = async (req, res) => {
 
     res.json({
       account_id: accountId,
+      current_balance: currentBalance,
       transactions: transactionsResult.recordset,
     });
   } catch (err) {

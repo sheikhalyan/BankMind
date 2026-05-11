@@ -84,13 +84,14 @@ const getRejectedUsers = async (req, res) => {
   }
 };
 
-// Get rejected customers
+// Get rejected customers - FIXED VERSION
 const getRejectedCustomers = async (req, res) => {
   try {
     console.log("🔍 getRejectedCustomers called");
     const pool = await poolPromise;
     console.log("✅ Database connected");
 
+    // ✅ ADD a 'is_rejected' column or check for explicit rejection
     const result = await pool.request().query(`
         SELECT 
           customer_id, 
@@ -99,7 +100,9 @@ const getRejectedCustomers = async (req, res) => {
           phone, 
           created_at
         FROM Customers 
-        WHERE is_admin_approved = 0 AND is_user_approved = 0
+        WHERE is_admin_approved = 0 
+          AND is_user_approved = 0
+          AND is_rejected = 1  -- 👈 ADD THIS (if you have is_rejected column)
         ORDER BY created_at DESC
       `);
 
@@ -171,41 +174,70 @@ const deleteRejectedUser = async (req, res) => {
 
 // Admin approves customer
 const adminApproveCustomer = async (req, res) => {
-  const customerId = req.params.id;
+  const { id: customerId } = req.params;
+  const adminId = req.user.userId;
+
   try {
-    console.log(`🔍 Admin approving customer ${customerId}`);
     const pool = await poolPromise;
+
+    // ✅ Get customer info FIRST
+    const customerInfoResult = await pool
+      .request()
+      .input("customerId", sql.Int, customerId)
+      .query(`
+        SELECT customer_name, email 
+        FROM Customers 
+        WHERE customer_id = @customerId
+      `);
+
+    if (customerInfoResult.recordset.length === 0) {
+      return res.status(404).json({ 
+        success: false,
+        message: "Customer not found" 
+      });
+    }
+
+    const customerInfo = customerInfoResult.recordset[0];
+
+    // ✅ Update customer
     const result = await pool
       .request()
-      .input("customer_id", sql.Int, customerId).query(`
+      .input("customer_id", sql.Int, customerId)
+      .query(`
         UPDATE Customers
         SET is_admin_approved = 1
         WHERE customer_id = @customer_id
           AND is_user_approved = 1
       `);
 
-    // ✅ Notify customer about admin approval
+    if (result.rowsAffected[0] === 0) {
+      return res.status(400).json({ 
+        success: false,
+        message: "Customer must be approved by a user first" 
+      });
+    }
+
+    // ✅ Send notification to CUSTOMER about admin approval
     await createNotification(
       customerId,
       "CUSTOMER_FULLY_APPROVED",
-      `Congratulations! Your registration has been fully approved. You can now log in and create accounts.`,
+      `Congratulations ${customerInfo.customer_name}! Your registration has been fully approved. You can now log in and create accounts.`,
       null,
     );
 
-    if (result.rowsAffected[0] === 0) {
-      return res
-        .status(400)
-        .json({ message: "Customer must be approved by a user first" });
-    }
-    console.log(`✅ Customer ${customerId} approved by admin`);
-    res.json({ message: "Customer approved by admin successfully" });
+    res.status(200).json({ 
+      success: true,
+      message: "Customer approved by admin successfully" 
+    });
+    
   } catch (err) {
-    console.error("❌ Error in adminApproveCustomer:", err);
+    console.error("Error in adminApproveCustomer:", err);
     res.status(500).json({ error: err.message });
   }
 };
 
 // Reject customer
+
 const rejectCustomer = async (req, res) => {
   const customerId = req.params.id;
   try {
@@ -214,11 +246,11 @@ const rejectCustomer = async (req, res) => {
     await pool.request().input("customer_id", sql.Int, customerId).query(`
         UPDATE Customers 
         SET is_admin_approved = 0,
-            is_user_approved = 0
+            is_user_approved = 0,
+            is_rejected = 1  -- 👈 ADD THIS
         WHERE customer_id = @customer_id
       `);
 
-    // ✅ Notify customer about admin rejection
     await createNotification(
       customerId,
       "CUSTOMER_ADMIN_REJECTED",

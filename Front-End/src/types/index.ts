@@ -43,8 +43,10 @@ export interface Transaction {
   fromAccount?: string;
   toAccount?: string;
   description: string;
+  transaction_reason?: string;  // 👈 Add this field
   createdAt: string;
   createdBy?: string;
+  running_balance?: number; 
 }
 
 export interface LoanRequest {

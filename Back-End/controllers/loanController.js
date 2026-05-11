@@ -1,11 +1,6 @@
 const { poolPromise, sql } = require("../config/db");
 const { createNotification, notifyAdmins } = require("../utils/notifications");
 
-/**
- * =========================
- * CUSTOMER APPLY FOR LOAN
- * =========================
- */
 const applyLoan = async (req, res) => {
   const { loan_type, loan_amount, duration_months } = req.body;
   const customerId = req.user.customerId;
@@ -16,6 +11,31 @@ const applyLoan = async (req, res) => {
 
   try {
     const pool = await poolPromise;
+
+    // ✅ CHECK: Does customer already have an active or pending loan?
+    const existingLoanResult = await pool
+      .request()
+      .input("customer_id", sql.Int, customerId).query(`
+        SELECT loan_id, status, loan_amount, created_at
+        FROM Loans
+        WHERE customer_id = @customer_id
+          AND status IN ('PENDING', 'APPROVED', 'ACTIVE')
+        ORDER BY created_at DESC
+      `);
+
+    if (existingLoanResult.recordset.length > 0) {
+      const existingLoan = existingLoanResult.recordset[0];
+      return res.status(400).json({
+        success: false,
+        message: `You already have a ${existingLoan.status.toLowerCase()} loan application. Please wait until it is processed before applying for a new loan.`,
+        existing_loan: {
+          id: existingLoan.loan_id,
+          status: existingLoan.status,
+          amount: existingLoan.loan_amount,
+          applied_on: existingLoan.created_at,
+        },
+      });
+    }
 
     // 🔍 Fetch Loan Policy
     const policyResult = await pool
@@ -54,8 +74,24 @@ const applyLoan = async (req, res) => {
     const endDate = new Date();
     endDate.setMonth(endDate.getMonth() + duration_months);
 
+    // ✅ Get customer info to find associated user
+    const customerResult = await pool
+      .request()
+      .input("customer_id", sql.Int, customerId).query(`
+        SELECT customer_name, approved_by_user 
+        FROM Customers 
+        WHERE customer_id = @customer_id
+      `);
+
+    if (customerResult.recordset.length === 0) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    const customerInfo = customerResult.recordset[0];
+    const associatedUserId = customerInfo.approved_by_user;
+
     // 💾 Insert Loan
-    await pool
+    const insertResult = await pool
       .request()
       .input("customer_id", sql.Int, customerId)
       .input("policy_id", sql.Int, policy.policy_id)
@@ -63,32 +99,61 @@ const applyLoan = async (req, res) => {
       .input("start_date", sql.Date, startDate)
       .input("end_date", sql.Date, endDate).query(`
         INSERT INTO Loans
-        (customer_id, policy_id, loan_amount, start_date, end_date)
+        (customer_id, policy_id, loan_amount, start_date, end_date, status)
+        OUTPUT INSERTED.loan_id
         VALUES
-        (@customer_id, @policy_id, @loan_amount, @start_date, @end_date)
+        (@customer_id, @policy_id, @loan_amount, @start_date, @end_date, 'PENDING')
       `);
 
-    // ✅ Notify associated user about loan application
-    if (associatedUser) {
+    const loanId = insertResult.recordset[0]?.loan_id;
+
+    // ✅ NOTIFY THE USER (approver)
+    if (associatedUserId) {
       await createNotification(
-        associatedUser,
-        "LOAN_APPLICATION",
-        `Customer applied for a ${loan_type} loan of $${loan_amount}`,
+        pool,
+        associatedUserId,
         null,
+        "LOAN_APPLICATION",
+        `Customer ${customerInfo.customer_name} applied for a ${loan_type} loan of $${loan_amount}. Please review.`,
+        loanId,
       );
     }
 
+    // ✅ NOTIFY THE CUSTOMER
+    await createNotification(
+      pool,
+      null,
+      customerId,
+      "LOAN_SUBMITTED",
+      `Your ${loan_type} loan application of $${loan_amount} has been submitted and is pending approval.`,
+      loanId,
+    );
+
+    // ✅ Notify all admins
+    await notifyAdmins(
+      pool,
+      "LOAN_APPLICATION",
+      `Customer ${customerInfo.customer_name} applied for a ${loan_type} loan of $${loan_amount}`,
+      loanId,
+    );
+
+    // ✅ Send success response
     res.status(201).json({
+      success: true,
       message: "Loan application submitted successfully",
       status: "PENDING",
       interest_rate: policy.interest_rate,
+      loan_id: loanId,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Error in applyLoan:", err);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
   }
 };
 
-// Get loans by customer ID
 const getLoansByCustomer = async (req, res) => {
   const customerId = req.params.customerId;
 
@@ -103,36 +168,25 @@ const getLoansByCustomer = async (req, res) => {
           l.loan_amount as amount,
           l.status,
           l.created_at as createdAt,
-          -- Only include start_date if it's not NULL
-          CASE 
-            WHEN l.start_date IS NOT NULL THEN l.start_date 
-            ELSE NULL 
-          END as startDate,
-          -- Only include end_date if it's not NULL
-          CASE 
-            WHEN l.end_date IS NOT NULL THEN l.end_date 
-            ELSE NULL 
-          END as endDate,
+          CASE WHEN l.start_date IS NOT NULL THEN l.start_date ELSE NULL END as startDate,
+          CASE WHEN l.end_date IS NOT NULL THEN l.end_date ELSE NULL END as endDate,
           l.approved_by_user as approvedBy,
           l.approved_at as approvedAt,
           l.rejection_reason as rejectionReason,
           lp.loan_type as loanType,
-          lp.interest_rate as interestRate,
-          lp.min_amount as minAmount,
-          lp.max_amount as maxAmount,
-          lp.min_months as minMonths,
-          lp.max_months as maxMonths
+          lp.interest_rate as interestRate
         FROM Loans l
         JOIN Loan_Policies lp ON l.policy_id = lp.policy_id
         WHERE l.customer_id = @customer_id
         ORDER BY l.created_at DESC
       `);
 
-    res.json({
+    res.status(200).json({
+      success: true,
       loans: result.recordset,
     });
   } catch (err) {
-    console.error("❌ Error fetching loans by customer:", err);
+    console.error("Error fetching loans by customer:", err);
     res.status(500).json({ error: err.message });
   }
 };

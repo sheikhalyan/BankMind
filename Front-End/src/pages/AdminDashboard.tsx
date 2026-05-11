@@ -40,6 +40,7 @@ interface Customer {
   is_admin_approved: number;
   approved_by_user?: number;
   approved_by_user_name?: string;
+  is_rejected?: number;
 }
 
 type TabType = "users" | "customers";
@@ -111,6 +112,15 @@ export default function AdminDashboard() {
     null,
   );
 
+  // 👇 ADD THIS HELPER FUNCTION HERE
+  const showMessageWithTimeout = (type: "success" | "error", text: string) => {
+    setMessage({ type, text });
+
+    setTimeout(() => {
+      setMessage({ type: "", text: "" });
+    }, 3000);
+  };
+
   // Fetch all data
   const fetchAllData = async () => {
     setLoading(true);
@@ -155,18 +165,20 @@ export default function AdminDashboard() {
   };
 
   // Filter customers based on selected filter
+  // Filter customers based on selected filter
   const getFilteredCustomers = () => {
     let filtered = [...allCustomers];
 
     if (customerFilter === "pending") {
-      filtered = filtered.filter((c) => Number(c.is_admin_approved) === 0);
+      // ✅ Pending = not admin approved AND not rejected
+      filtered = filtered.filter(
+        (c) => Number(c.is_admin_approved) === 0 && Number(c.is_rejected) !== 1, // 👈 Add this check
+      );
     } else if (customerFilter === "approved") {
       filtered = filtered.filter((c) => Number(c.is_admin_approved) === 1);
     } else if (customerFilter === "rejected") {
-      filtered = filtered.filter(
-        (c) =>
-          Number(c.is_admin_approved) === 0 && Number(c.is_user_approved) === 0,
-      );
+      // ✅ Rejected = explicitly rejected (you need is_rejected column)
+      filtered = filtered.filter((c) => Number(c.is_rejected) === 1);
     }
 
     return filtered.filter(
@@ -189,64 +201,49 @@ export default function AdminDashboard() {
     approved: allUsers.filter((u) => Number(u.is_approved) === 1).length,
     rejected: allUsers.filter((u) => Number(u.is_rejected) === 1).length,
   };
-
+  /////
   const customerCounts = {
     all: allCustomers.length,
-    pending: allCustomers.filter((c) => Number(c.is_admin_approved) === 0)
-      .length,
+    pending: allCustomers.filter(
+      (c) => Number(c.is_admin_approved) === 0 && Number(c.is_rejected) !== 1, // 👈 Fix this
+    ).length,
     approved: allCustomers.filter((c) => Number(c.is_admin_approved) === 1)
       .length,
-    rejected: allCustomers.filter(
-      (c) =>
-        Number(c.is_admin_approved) === 0 && Number(c.is_user_approved) === 0,
-    ).length,
+    rejected: allCustomers.filter((c) => Number(c.is_rejected) === 1).length, // 👈 Fix this
   };
 
   // Check if there are any pending items for conditional Actions column
   const hasPendingUsers = userCounts.pending > 0;
   const hasPendingCustomers = customerCounts.pending > 0;
 
-  // User Actions
   const handleApproveUser = async (userId: number) => {
     try {
       await adminService.approveUser(userId);
-      setMessage({ type: "success", text: "User approved successfully" });
+      showMessageWithTimeout("success", "User approved successfully");
       fetchAllData();
     } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to approve user",
-      });
+      showMessageWithTimeout("error", err.message || "Failed to approve user");
     }
   };
 
   const handleRejectUser = async (userId: number) => {
     try {
       await adminService.rejectUser(userId);
-      setMessage({ type: "success", text: "User rejected" });
+      showMessageWithTimeout("success", "User rejected");
       fetchAllData();
     } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to reject user",
-      });
+      showMessageWithTimeout("error", err.message || "Failed to reject user");
     }
   };
 
   const handleDeleteRejectedUser = async (userId: number) => {
     try {
       await adminService.deleteRejectedUser(userId);
-      setMessage({
-        type: "success",
-        text: "Rejected user deleted permanently",
-      });
+      showMessageWithTimeout("success", "Rejected user deleted permanently");
       setShowDeleteConfirm(null);
       fetchAllData();
     } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to delete user",
-      });
+      showMessageWithTimeout("error", err.message || "Failed to delete user");
     }
   };
 
@@ -254,43 +251,43 @@ export default function AdminDashboard() {
   const handleApproveCustomer = async (customerId: number) => {
     try {
       await adminService.approveCustomer(customerId);
-      setMessage({ type: "success", text: "Customer approved successfully" });
+      showMessageWithTimeout("success", "Customer approved successfully");
       fetchAllData();
     } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to approve customer",
-      });
+      showMessageWithTimeout(
+        "error",
+        err.message || "Failed to approve customer",
+      );
     }
   };
 
   const handleRejectCustomer = async (customerId: number) => {
     try {
       await adminService.rejectCustomer(customerId);
-      setMessage({ type: "success", text: "Customer rejected" });
+      showMessageWithTimeout("success", "Customer rejected");
       fetchAllData();
     } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to reject customer",
-      });
+      showMessageWithTimeout(
+        "error",
+        err.message || "Failed to reject customer",
+      );
     }
   };
 
   const handleDeleteRejectedCustomer = async (customerId: number) => {
     try {
       await adminService.deleteRejectedCustomer(customerId);
-      setMessage({
-        type: "success",
-        text: "Rejected customer deleted permanently",
-      });
+      showMessageWithTimeout(
+        "success",
+        "Rejected customer deleted permanently",
+      );
       setShowDeleteConfirm(null);
       fetchAllData();
     } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to delete customer",
-      });
+      showMessageWithTimeout(
+        "error",
+        err.message || "Failed to delete customer",
+      );
     }
   };
 
@@ -314,11 +311,10 @@ export default function AdminDashboard() {
   };
 
   // Get status display for customer
+  // Get status display for customer
   const getCustomerStatus = (customer: Customer) => {
     const isAdminApproved = Number(customer.is_admin_approved) === 1;
-    const isRejected =
-      Number(customer.is_admin_approved) === 0 &&
-      Number(customer.is_user_approved) === 0;
+    const isRejected = Number(customer.is_rejected) === 1; // 👈 Use is_rejected flag
 
     if (isAdminApproved) return "approved";
     if (isRejected) return "rejected";

@@ -1,5 +1,5 @@
 const { poolPromise, sql } = require("../config/db");
-const { createNotification , notifyAdmins} = require('../utils/notifications');
+const { createNotification, notifyAdmins } = require("../utils/notifications");
 
 /* =========================
    USER: VIEW ALL ACCOUNTS
@@ -73,6 +73,26 @@ const approveAccount = async (req, res) => {
   try {
     const pool = await poolPromise;
 
+    // ✅ FIRST: Get account and customer info
+    const accountInfoResult = await pool
+      .request()
+      .input("accountId", sql.Int, accountId).query(`
+        SELECT a.customer_id, a.account_type, c.customer_name
+        FROM Accounts a
+        JOIN Customers c ON a.customer_id = c.customer_id
+        WHERE a.account_id = @accountId
+      `);
+
+    if (accountInfoResult.recordset.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Account not found",
+      });
+    }
+
+    const accountInfo = accountInfoResult.recordset[0];
+
+    // ✅ SECOND: Update the account
     const result = await pool
       .request()
       .input("accountId", sql.Int, accountId)
@@ -88,24 +108,31 @@ const approveAccount = async (req, res) => {
 
     if (result.rowsAffected[0] === 0) {
       return res.status(400).json({
+        success: false,
         message: "Account already processed or does not exist",
       });
     }
 
-    // ✅ Notify customer about account approval
+    // ✅ THIRD: Notify customer about account approval (using accountInfo)
     await createNotification(
-      accountInfo.recordset[0].customer_id,
+      accountInfo.customer_id,
       "ACCOUNT_APPROVED",
-      `Your ${accountInfo.recordset[0].account_type} account has been APPROVED!`,
+      `Your ${accountInfo.account_type} account has been APPROVED by User #${userId}!`,
       accountId,
     );
 
-    res.json({
+    res.status(200).json({
+      success: true,
       message: "Account approved by user",
       approved_by_user: userId,
+      accountId: accountId,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Approve account error:", err);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
   }
 };
 
@@ -158,6 +185,7 @@ const rejectAccount = async (req, res) => {
 /* =========================
    CUSTOMER: CREATE ACCOUNT
 ========================= */
+// Create Account (Customer)
 const createAccount = async (req, res) => {
   const { account_type } = req.body;
   const customerId = req.user.customerId;
@@ -165,32 +193,76 @@ const createAccount = async (req, res) => {
   try {
     const pool = await poolPromise;
 
+    // ✅ Check existing accounts for this customer
+    const existingAccounts = await pool
+      .request()
+      .input("customerId", sql.Int, customerId).query(`
+        SELECT account_type, status 
+        FROM Accounts 
+        WHERE customer_id = @customerId
+      `);
+
+    const existingTypes = existingAccounts.recordset.map((a) =>
+      a.account_type.toUpperCase(),
+    );
+
+    // ✅ Check if customer already has 2 accounts
+    if (existingAccounts.recordset.length >= 2) {
+      return res.status(400).json({
+        message:
+          "You can only have maximum 2 accounts (1 Savings and 1 Current)",
+      });
+    }
+
+    // ✅ Check if they already have this account type
+    if (existingTypes.includes(account_type.toUpperCase())) {
+      return res.status(400).json({
+        message: `You already have a ${account_type} account. You can only have one Savings and one Current account.`,
+      });
+    }
+
+    // Get customer's associated user
+    const customerResult = await pool
+      .request()
+      .input("customer_id", sql.Int, customerId)
+      .query(
+        `SELECT approved_by_user, customer_name FROM Customers WHERE customer_id = @customer_id`,
+      );
+
+    const customer = customerResult.recordset[0];
+    const associatedUser = customer?.approved_by_user;
+    const customerName = customer?.customer_name || "Customer";
+
     await pool
       .request()
       .input("customerId", sql.Int, customerId)
       .input("accountType", sql.VarChar, account_type).query(`
-        INSERT INTO Accounts (customer_id, account_type, is_user_approved,status)
-        VALUES (@customerId, @accountType, 0,'INACTIVE')
+        INSERT INTO Accounts (customer_id, account_type, is_user_approved, status)
+        VALUES (@customerId, @accountType, 0, 'INACTIVE')
       `);
 
-    // ✅ Notify associated user about account creation
+    // Notify associated user about account creation
     if (associatedUser) {
       await createNotification(
+        pool,
         associatedUser,
+        null,
         "ACCOUNT_CREATED",
-        `Customer created a new ${account_type} account waiting for approval`,
+        `${customerName} created a new ${account_type} account waiting for approval`,
         null,
       );
     }
 
     res.status(201).json({
       message: "Account created. Awaiting user approval.",
+      existingAccounts: existingAccounts.recordset.length + 1,
+      maxAllowed: 2,
     });
   } catch (err) {
+    console.error("Create account error:", err);
     res.status(500).json({ error: err.message });
   }
 };
-
 // Get accounts by customer ID
 const getAccountsByCustomer = async (req, res) => {
   const customerId = req.params.customerId;

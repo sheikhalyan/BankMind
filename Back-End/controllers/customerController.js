@@ -59,36 +59,60 @@ const userApproveCustomer = async (req, res) => {
   try {
     const pool = await poolPromise;
 
+    // ✅ Get customer info FIRST
+    const customerInfoResult = await pool
+      .request()
+      .input("customerId", sql.Int, customerId)
+      .query(`
+        SELECT customer_name, email 
+        FROM Customers 
+        WHERE customer_id = @customerId
+      `);
+
+    if (customerInfoResult.recordset.length === 0) {
+      return res.status(404).json({ 
+        success: false,
+        message: "Customer not found" 
+      });
+    }
+
+    const customerInfo = customerInfoResult.recordset[0];
+
+    // ✅ Update customer
     await pool
       .request()
       .input("customerId", sql.Int, customerId)
-      .input("approved_by_user", sql.Int, approvingUserId).query(`
+      .input("approved_by_user", sql.Int, approvingUserId)
+      .query(`
         UPDATE Customers
         SET is_user_approved = 1,
             approved_by_user = @approved_by_user
         WHERE customer_id = @customerId
       `);
 
-    // ✅ Notify customer about user approval
+    // ✅ Send notification to CUSTOMER
     await createNotification(
       customerId,
-      "CUSTOMER_APPROVED",
+      "CUSTOMER_APPROVED_BY_USER",
       `Your registration has been approved by User #${approvingUserId}! Awaiting admin approval.`,
       null,
     );
 
-    // ✅ Notify admin about user approval
+    // ✅ Notify ADMIN about user approval (using customerInfo)
     await notifyAdmin(
       pool,
-      `User #${approvingUserId} approved customer: ${customerInfo.recordset[0]?.customer_name}`,
+      `User #${approvingUserId} approved customer: ${customerInfo.customer_name}`,
       "CUSTOMER_APPROVAL",
     );
 
-    res.json({
+    res.status(200).json({
+      success: true,
       message: "Customer approved by user",
-      approved_by_user: approvingUserId,
+      approved_by_user: approvingUserId
     });
+    
   } catch (err) {
+    console.error("Error in userApproveCustomer:", err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -196,5 +220,5 @@ module.exports = {
   getAllCustomers,
   userApproveCustomer,
   userRejectCustomer,
-  deleteRejectedCustomer
+  deleteRejectedCustomer,
 };
