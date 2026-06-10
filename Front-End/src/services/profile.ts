@@ -1,19 +1,24 @@
 import { api } from './api';
 
 export interface UserProfile {
-  user_id: number;
+  id: number;
   full_name: string;
   email: string;
   role: string;
+  status: string;
   phone?: string;
   address?: string;
+  city?: string;
+  country?: string;
   created_at: string;
+  last_login?: string;
 }
 
 export interface UpdateProfileData {
-  full_name?: string;
+  full_name: string;
   phone?: string;
   address?: string;
+  city?: string;
 }
 
 export interface ChangePasswordData {
@@ -22,37 +27,17 @@ export interface ChangePasswordData {
 }
 
 export const profileService = {
-  // Get user profile
+
   getProfile: async (): Promise<UserProfile> => {
-    try {
-      const response = await api.get('/user/profile');
-      console.log('📊 Profile API response:', response);
-      return response;
-    } catch (error) {
-      console.error('❌ Error in getProfile:', error);
-      throw error;
-    }
+    return api.get('/user/profile');
   },
 
-  // Update profile
   updateProfile: async (data: UpdateProfileData): Promise<{ message: string }> => {
-    try {
-      const response = await api.put('/user/profile', data);
-      return response;
-    } catch (error) {
-      console.error('❌ Error in updateProfile:', error);
-      throw error;
-    }
+    return api.put('/user/profile', data);
   },
 
-  // Change password
   changePassword: async (data: ChangePasswordData): Promise<{ message: string }> => {
-    try {
-      const response = await api.put('/user/change-password', data);
-      return response;
-    } catch (error) {
-      console.error('❌ Error in changePassword:', error);
-      throw error;
-    }
+    return api.put('/user/change-password', data);
   },
+
 };

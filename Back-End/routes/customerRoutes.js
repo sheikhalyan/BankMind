@@ -1,52 +1,62 @@
 const express = require('express');
 const router = express.Router();
 
-// ✅ FIX: properly define customerController
-const customerController = require('../controllers/customerController');
-const authMiddleware = require('../middlewares/authMiddleware');
+const {
+  registerCustomer,
+  getAllCustomers,
+  getCustomerById,
+  getPendingForStaff,
+  getPendingForAdmin,
+  staffApproveCustomer,
+  staffRejectCustomer,
+  adminApproveCustomer,
+  adminRejectCustomer,
+  assignStaff,
+  suspendCustomer,
+  reactivateCustomer,
+} = require('../controllers/customerController');
 
+const {
+  verifyToken,
+  isStaff,
+  isAdmin,
+  isStaffOrAdmin,
+} = require('../middlewares/authMiddleware');
 
-// Get customers pending user approval
-router.get(
-  '/pending-user-approval',
-  authMiddleware.verifyToken,
-  authMiddleware.isUser,
-  customerController.getPendingForUserApproval
-);
+// ─────────────────────────────────────────────────────────────────
+//  PUBLIC — Customer self-registration (no token needed)
+// ─────────────────────────────────────────────────────────────────
+router.post('/register', registerCustomer);
 
-// Get all customers
-router.get(
-  '/all',
-  authMiddleware.verifyToken,
-  authMiddleware.isUser,
-  customerController.getAllCustomers
-);
+// ─────────────────────────────────────────────────────────────────
+//  READ (Staff + Admin)
+// ─────────────────────────────────────────────────────────────────
 
-// User approve customer
-router.put(
-  '/user-approve/:customerId',
-  authMiddleware.verifyToken,
-  authMiddleware.isUser,
-  customerController.userApproveCustomer
-);
+// GET /api/customer/all  — all customers (staff sees all to pick up new ones)
+router.get('/', verifyToken, isStaffOrAdmin, getAllCustomers);
 
-// User reject customer
-router.put(
-  '/user-reject/:customerId',
-  authMiddleware.verifyToken,
-  authMiddleware.isUser,
-  customerController.userRejectCustomer
-);
+// GET /api/customer/pending/staff  — unclaimed, no staff approval yet
+router.get('/pending/staff', verifyToken, isStaffOrAdmin, getPendingForStaff);
 
-// User can delete rejected customer
-router.delete(
-  '/rejected/:customerId',
-  authMiddleware.verifyToken,
-  authMiddleware.isUser,
-  customerController.deleteRejectedCustomer
-);
+// GET /api/customer/pending/admin  — staff approved, awaiting admin
+router.get('/pending/admin', verifyToken, isAdmin, getPendingForAdmin);
 
-console.log('✅ Customer routes registered with:');
-console.log('  - DELETE /rejected/:customerId');
+// GET /api/customer/:customerId
+router.get('/:customerId', verifyToken, isStaffOrAdmin, getCustomerById);
+
+// ─────────────────────────────────────────────────────────────────
+//  STAFF ACTIONS
+// ─────────────────────────────────────────────────────────────────
+router.put('/:customerId/staff-approve', verifyToken, isStaff, staffApproveCustomer);
+router.put('/:customerId/staff-reject', verifyToken, isStaff, staffRejectCustomer);
+
+// ─────────────────────────────────────────────────────────────────
+//  ADMIN ACTIONS
+// ─────────────────────────────────────────────────────────────────
+router.put('/:customerId/admin-approve', verifyToken, isAdmin, adminApproveCustomer);
+router.put('/:customerId/admin-reject', verifyToken, isAdmin, adminRejectCustomer);
+router.put('/:customerId/assign-staff', verifyToken, isAdmin, assignStaff);
+router.put('/:customerId/suspend', verifyToken, isAdmin, suspendCustomer);
+router.put('/:customerId/reactivate', verifyToken, isAdmin, reactivateCustomer);
 
 module.exports = router;

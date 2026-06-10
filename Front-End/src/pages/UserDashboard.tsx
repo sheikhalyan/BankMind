@@ -1,533 +1,339 @@
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import { useAuth } from "../context/AuthContext";
-import { userService } from "../services/user.ts";
-import { accountService } from "../services/account.ts";
-import { loanService } from "../services/loan.ts";
+import { userService } from "../services/user";
+import { accountService } from "../services/account";
+import { loanService } from "../services/loan";
+import { api } from "../services/api";
 import NotificationBell from "../components/NotificationBell";
-import {
-  Users,
-  UserCheck,
-  Building,
-  RefreshCw,
-  LogOut,
-  DollarSign,
-  CreditCard,
-  FileText,
-  Eye,
-  Search,
-  Clock,
-  AlertCircle,
-  Trash2,
-  CheckCircle,
-  XCircle,
-  User,
-} from "lucide-react";
-import { navigate } from "../components/Router";
 import ProfileModal from "../components/ProfileModal";
+import { navigate } from "../components/Router";
+import {
+  Users, UserCheck, Building, RefreshCw, LogOut,
+  DollarSign, CreditCard, FileText, Eye, Search,
+  Clock, AlertCircle, CheckCircle, XCircle, User,
+  Calendar, ChevronDown, ChevronUp,
+} from "lucide-react";
 
-// ==================== Types ====================
+// ================================================================
+//  TYPES
+// ================================================================
 interface Customer {
   customer_id: number;
-  customer_name: string;
+  full_name: string;
   email: string;
   phone: string;
-  address: string;
+  city: string | null;
+  country: string;
+  status: "PENDING" | "ACTIVE" | "REJECTED" | "SUSPENDED";
   created_at: string;
-  is_user_approved: number;
-  is_admin_approved: number;
-  approved_by_user?: number;
-  associated_user_name?: string;
-  associated_user_email?: string;
+  assigned_staff_id: number | null;
+  assigned_staff_name: string | null;
+  staff_approval_status: string | null;
+  admin_approval_status: string | null;
 }
 
 interface Account {
   account_id: number;
   customer_id: number;
-  customer_name: string;
-  account_type: string | null;
+  account_number: string;
+  account_type: "CURRENT" | "SAVINGS";
   balance: number;
   status: string;
   opened_date: string;
-  customer_email?: string;
+  customer_name: string;
 }
 
 interface Loan {
   loan_id: number;
+  customer_id: number;
   customer_name: string;
   loan_type: string;
   loan_amount: number;
+  approved_amount: number | null;
+  duration_months: number;
   interest_rate: number;
   status: string;
+  auto_deduct: boolean;
   created_at: string;
-  approved_at?: string;
-  rejected_at?: string;
-  rejection_reason?: string;
+  staff_approval_status: string | null;
+  staff_approval_remarks: string | null;
+  admin_approval_status: string | null;
+  admin_approval_remarks: string | null;
 }
 
-type TabType = "all-customers" | "pending-loans" | "deposit" | "accounts";
+interface Repayment {
+  repayment_id: number;
+  installment_no: number;
+  amount: number;
+  due_date: string;
+  paid_date: string | null;
+  status: "PENDING" | "PAID" | "OVERDUE" | "FAILED";
+}
 
-// ==================== Helper Functions ====================
-const formatDate = (dateString: string) => {
-  if (!dateString) return "N/A";
-  try {
-    const date = new Date(dateString);
-    if (isNaN(date.getTime())) return "N/A";
-    return date.toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return "N/A";
-  }
+type TabType = "customers" | "accounts" | "loans" | "deposit";
+type LoanFilter = "ALL" | "PENDING" | "ACTIVE" | "REJECTED";
+type CustomerFilter = "ALL" | "PENDING" | "ACTIVE" | "REJECTED" | "MY_CUSTOMERS";
+
+// ================================================================
+//  HELPERS
+// ================================================================
+const formatDate = (d: string | null) => {
+  if (!d) return "N/A";
+  try { return new Date(d).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" }); }
+  catch { return "N/A"; }
 };
 
-const getStatusBadge = (status: string = "") => {
-  const statusLower = status.toLowerCase();
-  switch (statusLower) {
-    case "active":
-    case "approved":
-      return {
-        bg: "bg-green-100",
-        text: "text-green-800",
-        icon: <CheckCircle className="w-3 h-3" />,
-      };
-    case "pending":
-    case "inactive":
-      return {
-        bg: "bg-yellow-100",
-        text: "text-yellow-800",
-        icon: <Clock className="w-3 h-3" />,
-      };
-    case "rejected":
-      return {
-        bg: "bg-red-100",
-        text: "text-red-800",
-        icon: <XCircle className="w-3 h-3" />,
-      };
-    default:
-      return {
-        bg: "bg-gray-100",
-        text: "text-gray-800",
-        icon: <AlertCircle className="w-3 h-3" />,
-      };
-  }
+const formatCurrency = (n: number) =>
+  `PKR ${Number(n || 0).toLocaleString("en-PK")}`;
+
+const StatusBadge = ({ status }: { status: string }) => {
+  const s = status?.toUpperCase();
+  const map: Record<string, { bg: string; text: string; icon: React.ReactNode }> = {
+    ACTIVE: { bg: "bg-green-100", text: "text-green-800", icon: <CheckCircle className="w-3 h-3" /> },
+    PENDING: { bg: "bg-yellow-100", text: "text-yellow-800", icon: <Clock className="w-3 h-3" /> },
+    REJECTED: { bg: "bg-red-100", text: "text-red-800", icon: <XCircle className="w-3 h-3" /> },
+    SUSPENDED: { bg: "bg-orange-100", text: "text-orange-800", icon: <AlertCircle className="w-3 h-3" /> },
+    APPROVED: { bg: "bg-green-100", text: "text-green-800", icon: <CheckCircle className="w-3 h-3" /> },
+  };
+  const style = map[s] || { bg: "bg-gray-100", text: "text-gray-800", icon: <AlertCircle className="w-3 h-3" /> };
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-1 text-xs rounded-full ${style.bg} ${style.text}`}>
+      {style.icon} {status}
+    </span>
+  );
 };
 
-// ==================== Main Component ====================
+// ================================================================
+//  MAIN COMPONENT
+// ================================================================
 export default function UserDashboard() {
   const { user, logout } = useAuth();
-  const [activeTab, setActiveTab] = useState<TabType>("all-customers");
+  console.log("FULL USER OBJECT:", user);
+  const [activeTab, setActiveTab] = useState<TabType>("customers");
   const [showProfileModal, setShowProfileModal] = useState(false);
-
-  // ==================== Data States ====================
-  const [allCustomers, setAllCustomers] = useState<Customer[]>([]);
-  const [loans, setLoans] = useState<Loan[]>([]);
-  const [accounts, setAccounts] = useState<Account[]>([]);
-
-  // ==================== UI States ====================
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState({ type: "", text: "" });
   const [searchTerm, setSearchTerm] = useState("");
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState<number | null>(
-    null,
-  );
-  const [showCustomerDeleteConfirm, setShowCustomerDeleteConfirm] = useState<
-    number | null
-  >(null);
-  const [loanFilter, setLoanFilter] = useState<
-    "all" | "pending" | "approved" | "rejected"
-  >("all");
-  const [customerFilter, setCustomerFilter] = useState<
-    "all" | "pending" | "approved" | "rejected"
-  >("all");
+  const [loanFilter, setLoanFilter] = useState<LoanFilter>("ALL");
+  const [customerFilter, setCustomerFilter] = useState<CustomerFilter>("ALL");
+  const [rejectRemarks, setRejectRemarks] = useState("");
+  const [rejectingId, setRejectingId] = useState<number | null>(null);
 
-  // ==================== Deposit Form State ====================
-  const [showDepositForm, setShowDepositForm] = useState(false);
-  const [depositData, setDepositData] = useState({
-    accountId: "",
-    amount: "",
-    description: "",
-  });
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [loans, setLoans] = useState<Loan[]>([]);
+  const [depositData, setDepositData] = useState({ accountId: "", amount: "", description: "" });
 
-  // ==================== Filtered Data ====================
-  const filteredAccounts = accounts.filter((account) => {
-    const customerName = account.customer_name?.toLowerCase() || "";
-    const accountId = account.account_id?.toString() || "";
-    const search = searchTerm.toLowerCase();
-    return customerName.includes(search) || accountId.includes(search);
-  });
+  // Repayment schedule per loan
+  const [repaymentSchedules, setRepaymentSchedules] = useState<Record<number, Repayment[]>>({});
+  const [loadingScheduleId, setLoadingScheduleId] = useState<number | null>(null);
 
-  const getFilteredCustomers = () => {
-    if (!Array.isArray(allCustomers)) return [];
-
-    let filtered = [...allCustomers];
-    const currentUserId = user?.id;
-
-    if (customerFilter === "all") {
-      return filtered;
-    } else if (customerFilter === "pending") {
-      filtered = filtered.filter((c) => !c.approved_by_user);
-    } else if (customerFilter === "approved") {
-      filtered = filtered.filter(
-        (c) =>
-          c.approved_by_user === currentUserId &&
-          Number(c.is_user_approved) === 1 &&
-          Number(c.is_admin_approved) === 1,
-      );
-    } else if (customerFilter === "rejected") {
-      filtered = filtered.filter(
-        (c) =>
-          c.approved_by_user === currentUserId &&
-          Number(c.is_user_approved) === 0 &&
-          Number(c.is_admin_approved) === 0,
-      );
-    }
-
-    return filtered.filter(
-      (c) =>
-        (c.customer_name?.toLowerCase() || "").includes(
-          searchTerm.toLowerCase(),
-        ) ||
-        (c.email?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
-        (c.phone || "").includes(searchTerm),
-    );
+  const showMsg = (type: "success" | "error", text: string) => {
+    setMessage({ type, text });
+    setTimeout(() => setMessage({ type: "", text: "" }), 4000);
   };
 
-  const filteredCustomers = getFilteredCustomers();
-
-  // ==================== Count Calculations ====================
-  const totalCustomers = Array.isArray(allCustomers) ? allCustomers.length : 0;
-  const pendingCustomersCount = Array.isArray(allCustomers)
-    ? allCustomers.filter((c) => !c.approved_by_user).length
-    : 0;
-
-  const associatedCustomersCount = Array.isArray(allCustomers)
-    ? allCustomers.filter((c) => c.approved_by_user === user?.id).length
-    : 0;
-
-  const approvedCustomersCount = Array.isArray(allCustomers)
-    ? allCustomers.filter(
-        (c) =>
-          c.approved_by_user === user?.id &&
-          Number(c.is_user_approved) === 1 &&
-          Number(c.is_admin_approved) === 1,
-      ).length
-    : 0;
-  const rejectedCustomersCount = Array.isArray(allCustomers)
-    ? allCustomers.filter(
-        (c) =>
-          c.approved_by_user === user?.id &&
-          Number(c.is_user_approved) === 0 &&
-          Number(c.is_admin_approved) === 0,
-      ).length
-    : 0;
-
-  const unclaimedCustomers = Array.isArray(allCustomers)
-    ? allCustomers.filter((c) => !c.approved_by_user)
-    : [];
-
-  const filteredLoans = Array.isArray(loans)
-    ? loans.filter((loan) => {
-        if (loanFilter === "all") return true;
-        return loan.status?.toLowerCase() === loanFilter;
-      })
-    : [];
-
-  const totalLoans = Array.isArray(loans) ? loans.length : 0;
-  const pendingLoansCount = Array.isArray(loans)
-    ? loans.filter((l) => l.status?.toLowerCase() === "pending").length
-    : 0;
-  const approvedLoansCount = Array.isArray(loans)
-    ? loans.filter((l) => l.status?.toLowerCase() === "approved").length
-    : 0;
-  const rejectedLoansCount = Array.isArray(loans)
-    ? loans.filter((l) => l.status?.toLowerCase() === "rejected").length
-    : 0;
-
-  // ==================== Data Fetching ====================
-  const fetchAllData = async () => {
+  // ----------------------------------------------------------------
+  //  FETCH
+  // ----------------------------------------------------------------
+  const fetchAll = async () => {
     setLoading(true);
     try {
-      const [all, loansData, accountsData] = await Promise.all([
-        userService.getAllCustomers(),
-        loanService.getAllLoans(),
-        accountService.getUserAssociatedAccounts(),
+      const [cust, accs, loansData] = await Promise.all([
+        userService.getAllCustomers(),   // GET /api/customers  — staff sees assigned only
+        accountService.getAll(),         // GET /api/accounts   — staff sees assigned only
+        loanService.getAllLoans(),        // GET /api/loans      — staff sees assigned only
       ]);
-
-      setAllCustomers(Array.isArray(all) ? all : []);
+      setCustomers(Array.isArray(cust) ? cust : []);
+      setAccounts(Array.isArray(accs) ? accs : []);
       setLoans(Array.isArray(loansData) ? loansData : []);
-      setAccounts(Array.isArray(accountsData) ? accountsData : []);
     } catch (err: any) {
-      console.error("❌ Error fetching data:", err);
-      setMessage({ type: "error", text: "Failed to load data" });
+      showMsg("error", "Failed to load data.");
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => {
-    fetchAllData();
-  }, []);
+  useEffect(() => { fetchAll(); }, []);
 
-  // ==================== Customer Actions ====================
+  // ----------------------------------------------------------------
+  //  FILTERED DATA
+  // ----------------------------------------------------------------
+  const filteredCustomers = customers
+    .filter(c => {
+      if (customerFilter === "ALL") return true;
+      if (customerFilter === "PENDING")
+        return c.status === "PENDING" && !c.assigned_staff_id;
+      if (customerFilter === "MY_CUSTOMERS")
+        return c.assigned_staff_id === Number(user?.id);
+      if (customerFilter === "ACTIVE")
+        return c.assigned_staff_id === Number(user?.id) && c.status === "ACTIVE";
+      if (customerFilter === "REJECTED")
+        return c.assigned_staff_id === Number(user?.id) && c.status === "REJECTED";
+      return true;
+    })
+    .filter(c =>
+      c.full_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      c.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      c.phone?.includes(searchTerm)
+    );
+
+  const filteredLoans = loans
+    .filter(l => loanFilter === "ALL" || l.status === loanFilter)
+    .filter(l => l.customer_name?.toLowerCase().includes(searchTerm.toLowerCase()));
+
+  const filteredAccounts = accounts.filter(a =>
+    a.customer_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    a.account_number?.includes(searchTerm)
+  );
+
+  // Counts for badges
+  const pendingCustomers = customers.filter(c =>
+    c.status === "PENDING" && c.assigned_staff_id === Number(user?.id) && !c.staff_approval_status
+  ).length;
+  const pendingAccounts = accounts.filter(a => a.status === "PENDING").length;
+  const pendingLoans = loans.filter(l =>
+    l.status === "PENDING" && !l.staff_approval_status
+  ).length;
+
+  // ----------------------------------------------------------------
+  //  CUSTOMER ACTIONS
+  // ----------------------------------------------------------------
   const handleApproveCustomer = async (customerId: number) => {
     try {
       await userService.approveCustomer(customerId);
-      setMessage({ type: "success", text: "Customer approved successfully!" });
-      fetchAllData();
-    } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to approve customer",
-      });
-    }
+      showMsg("success", "Customer approved at staff level. Awaiting admin final approval.");
+      fetchAll();
+    } catch (err: any) { showMsg("error", err.message || "Failed."); }
   };
 
   const handleRejectCustomer = async (customerId: number) => {
+    if (!rejectRemarks.trim()) return showMsg("error", "Please provide a rejection reason.");
     try {
-      await userService.rejectCustomer(customerId);
-      setMessage({ type: "success", text: "Customer rejected" });
-      fetchAllData();
-    } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to reject customer",
-      });
-    }
+      await userService.rejectCustomer(customerId, rejectRemarks);
+      showMsg("success", "Customer rejected.");
+      setRejectingId(null); setRejectRemarks("");
+      fetchAll();
+    } catch (err: any) { showMsg("error", err.message || "Failed."); }
   };
 
-  const handleDeleteRejectedCustomer = async (customerId: number) => {
-    try {
-      await userService.deleteRejectedCustomer(customerId);
-      setMessage({
-        type: "success",
-        text: "Rejected customer deleted permanently",
-      });
-      setShowCustomerDeleteConfirm(null);
-      fetchAllData();
-    } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to delete customer",
-      });
-    }
-  };
-
-  // ==================== Loan Actions ====================
-  const handleApproveLoan = async (loanId: number) => {
-    const approved_amount = prompt("Enter approved amount:");
-    if (!approved_amount) return;
-
-    const duration_months = prompt("Enter duration in months:");
-    if (!duration_months) return;
-
-    try {
-      await loanService.approveLoan(loanId, {
-        approved_amount: parseFloat(approved_amount),
-        duration_months: parseInt(duration_months),
-      });
-      setMessage({ type: "success", text: "Loan approved successfully!" });
-      fetchAllData();
-    } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to approve loan",
-      });
-    }
-  };
-
-  const handleRejectLoan = async (loanId: number) => {
-    const reason = prompt("Please enter rejection reason:");
-    if (!reason) return;
-
-    try {
-      await loanService.rejectLoan(loanId, reason);
-      setMessage({ type: "success", text: "Loan rejected" });
-      fetchAllData();
-    } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to reject loan",
-      });
-    }
-  };
-
-  const handleDeleteRejectedLoan = async (loanId: number) => {
-    try {
-      await loanService.deleteRejectedLoan(loanId);
-      setMessage({
-        type: "success",
-        text: "Rejected loan deleted permanently",
-      });
-      setShowDeleteConfirm(null);
-      fetchAllData();
-    } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to delete loan",
-      });
-    }
-  };
-
-  // ==================== Account Actions ====================
+  // ----------------------------------------------------------------
+  //  ACCOUNT ACTIONS
+  // ----------------------------------------------------------------
   const handleApproveAccount = async (accountId: number) => {
     try {
       await accountService.approve(accountId);
-      setMessage({ type: "success", text: "Account approved successfully!" });
-      fetchAllData();
-
-      // ✅ Auto-hide message after 3 seconds
-      setTimeout(() => {
-        setMessage({ type: "", text: "" });
-      }, 3000);
-    } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to approve account",
-      });
-
-      // ✅ Also auto-hide error message after 3 seconds
-      setTimeout(() => {
-        setMessage({ type: "", text: "" });
-      }, 3000);
-    }
+      showMsg("success", "Account approved.");
+      fetchAll();
+    } catch (err: any) { showMsg("error", err.message || "Failed."); }
   };
 
   const handleRejectAccount = async (accountId: number) => {
+    const remarks = prompt("Rejection reason (optional):");
     try {
-      await accountService.reject(accountId);
-      setMessage({ type: "success", text: "Account rejected" });
-      fetchAllData();
+      await accountService.reject(accountId, remarks || undefined);
+      showMsg("success", "Account rejected.");
+      fetchAll();
+    } catch (err: any) { showMsg("error", err.message || "Failed."); }
+  };
 
-      setTimeout(() => {
-        setMessage({ type: "", text: "" });
-      }, 3000);
-    } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to reject account",
+  // ----------------------------------------------------------------
+  //  LOAN ACTIONS
+  // ----------------------------------------------------------------
+  const handleApproveLoan = async (loanId: number) => {
+    const approved_amount = prompt("Enter approved amount (PKR):");
+    if (!approved_amount) return;
+    const duration_months = prompt("Enter duration in months:");
+    if (!duration_months) return;
+    try {
+      await loanService.staffApproveLoan(loanId, {
+        approved_amount: parseFloat(approved_amount),
+        duration_months: parseInt(duration_months),
       });
+      showMsg("success", "Loan approved at staff level. Awaiting admin approval.");
+      fetchAll();
+    } catch (err: any) { showMsg("error", err.message || "Failed."); }
+  };
 
-      setTimeout(() => {
-        setMessage({ type: "", text: "" });
-      }, 3000);
+  const handleRejectLoan = async (loanId: number) => {
+    const reason = prompt("Enter rejection reason (required):");
+    if (!reason?.trim()) return showMsg("error", "Rejection reason is required.");
+    try {
+      await loanService.staffRejectLoan(loanId, reason);
+      showMsg("success", "Loan rejected.");
+      fetchAll();
+    } catch (err: any) { showMsg("error", err.message || "Failed."); }
+  };
+
+  // ── REPAYMENT SCHEDULE ────────────────────────────────────────────
+  const loadRepaymentSchedule = async (loanId: number) => {
+    // Toggle: hide if already loaded
+    if (repaymentSchedules[loanId]) {
+      setRepaymentSchedules(prev => { const next = { ...prev }; delete next[loanId]; return next; });
+      return;
+    }
+    setLoadingScheduleId(loanId);
+    try {
+      const res = await api.get(`/loan-repayments/${loanId}/schedule`);
+      const list: Repayment[] = Array.isArray(res) ? res : (res as any).schedule || (res as any).repayments || [];
+      setRepaymentSchedules(prev => ({ ...prev, [loanId]: list }));
+    } catch {
+      showMsg("error", "Failed to load repayment schedule.");
+    } finally {
+      setLoadingScheduleId(null);
     }
   };
 
-  const handleDeleteRejectedAccount = async (accountId: number) => {
-    try {
-      await accountService.deleteRejected(accountId);
-      setMessage({
-        type: "success",
-        text: "Rejected account deleted permanently",
-      });
-      setShowDeleteConfirm(null);
-      fetchAllData();
-
-      setTimeout(() => {
-        setMessage({ type: "", text: "" });
-      }, 3000);
-    } catch (err: any) {
-      setMessage({
-        type: "error",
-        text: err.message || "Failed to delete account",
-      });
-
-      setTimeout(() => {
-        setMessage({ type: "", text: "" });
-      }, 3000);
-    }
-  };
-
-  // ==================== Deposit Action ====================
+  // ----------------------------------------------------------------
+  //  DEPOSIT
+  // ----------------------------------------------------------------
   const handleDeposit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-
     try {
       await userService.depositMoney({
         accountId: parseInt(depositData.accountId),
         amount: parseFloat(depositData.amount),
         description: depositData.description,
       });
-
-      setMessage({ type: "success", text: "Deposit successful!" });
-      setShowDepositForm(false);
+      showMsg("success", "Deposit successful!");
       setDepositData({ accountId: "", amount: "", description: "" });
-      fetchAllData();
+      fetchAll();
     } catch (err: any) {
-      console.error("❌ Deposit error:", err);
-      setMessage({ type: "error", text: err.message || "Deposit failed" });
-    } finally {
-      setLoading(false);
-    }
+      showMsg("error", err.message || "Deposit failed.");
+    } finally { setLoading(false); }
   };
 
-  // ==================== Profile Update ====================
-  const handleProfileUpdate = () => {
-    fetchAllData();
-  };
-
-  // ==================== Logout ====================
-  const handleLogout = () => {
-    logout();
-    navigate("/login");
-  };
-
-  // ==================== Effects ====================
-  useEffect(() => {
-    if (depositData.accountId && activeTab === "deposit") {
-      setShowDepositForm(true);
-    }
-  }, [depositData.accountId, activeTab]);
-
+  // ================================================================
+  //  RENDER
+  // ================================================================
   return (
     <div className="min-h-screen bg-gray-50">
+
       {/* Header */}
       <header className="bg-white shadow sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <div className="flex justify-between items-center">
             <div>
-              <h1 className="text-2xl font-bold text-gray-900">
-                User Dashboard
-              </h1>
+              <h1 className="text-2xl font-bold text-gray-900">Staff Dashboard</h1>
               <p className="text-sm text-gray-600">
                 Welcome, {user?.name} •{" "}
                 <span className="font-mono text-blue-600">ID: {user?.id}</span>
               </p>
             </div>
             <div className="flex items-center gap-3">
-              {/* Notification Bell */}
               <NotificationBell />
-
-              {/* Profile Button */}
-              <button
-                onClick={() => setShowProfileModal(true)}
-                className="p-2 text-gray-600 hover:text-gray-900 rounded-full hover:bg-gray-100 transition"
-                title="Profile"
-              >
+              <button onClick={() => setShowProfileModal(true)}
+                className="p-2 text-gray-600 hover:text-gray-900 rounded-full hover:bg-gray-100">
                 <User className="w-5 h-5" />
               </button>
-
-              {/* Refresh Button */}
-              <button
-                onClick={fetchAllData}
-                className="p-2 text-gray-600 hover:text-gray-900 rounded-full hover:bg-gray-100"
-                title="Refresh"
-              >
-                <RefreshCw
-                  className={`w-5 h-5 ${loading ? "animate-spin" : ""}`}
-                />
+              <button onClick={fetchAll}
+                className="p-2 text-gray-600 hover:text-gray-900 rounded-full hover:bg-gray-100">
+                <RefreshCw className={`w-5 h-5 ${loading ? "animate-spin" : ""}`} />
               </button>
-
-              {/* Logout Button */}
-              <button
-                onClick={handleLogout}
-                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition flex items-center gap-2"
-              >
-                <LogOut className="w-4 h-4" />
-                Logout
+              <button onClick={() => { logout(); navigate("/login"); }}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center gap-2">
+                <LogOut className="w-4 h-4" /> Logout
               </button>
             </div>
           </div>
@@ -535,182 +341,460 @@ export default function UserDashboard() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {/* Message Alert */}
+
         {message.text && (
-          <div
-            className={`mb-6 p-4 rounded-lg ${
-              message.type === "success"
-                ? "bg-green-50 border border-green-200 text-green-700"
-                : "bg-red-50 border border-red-200 text-red-700"
-            }`}
-          >
-            {message.text}
-          </div>
+          <div className={`mb-6 p-4 rounded-lg ${message.type === "success"
+            ? "bg-green-50 border border-green-200 text-green-700"
+            : "bg-red-50 border border-red-200 text-red-700"
+            }`}>{message.text}</div>
         )}
 
         {/* Quick Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-          <QuickStatCard
-            label="Pending Customers"
-            value={pendingCustomersCount}
-            icon={<Users className="w-8 h-8 text-yellow-500" />}
-          />
-          <QuickStatCard
-            label="My Customers"
-            value={associatedCustomersCount}
-            icon={<Building className="w-8 h-8 text-blue-500" />}
-          />
-          <QuickStatCard
-            label="Total Loans"
-            value={totalLoans}
-            icon={<FileText className="w-8 h-8 text-orange-500" />}
-          />
-          <QuickStatCard
-            label="Total Accounts"
-            value={accounts.length}
-            icon={<CreditCard className="w-8 h-8 text-green-500" />}
-          />
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+          <StatCard label="Pending Customers" value={pendingCustomers} icon={<Users className="w-7 h-7 text-yellow-500" />} />
+          <StatCard label="Pending Accounts" value={pendingAccounts} icon={<CreditCard className="w-7 h-7 text-blue-500" />} />
+          <StatCard label="Pending Loans" value={pendingLoans} icon={<FileText className="w-7 h-7 text-orange-500" />} />
+          <StatCard label="My Customers"
+            value={customers.filter(c => c.assigned_staff_id === user?.id).length}
+            icon={<Building className="w-7 h-7 text-green-500" />} />
         </div>
 
-        {/* Navigation Tabs */}
-        <div className="bg-white rounded-lg shadow-lg mb-6">
+        {/* Tabs */}
+        <div className="bg-white rounded-lg shadow-lg">
           <div className="border-b border-gray-200">
             <nav className="flex flex-wrap">
-              <TabButton
-                active={activeTab === "all-customers"}
-                onClick={() => setActiveTab("all-customers")}
-                icon={<Eye className="w-4 h-4" />}
-                label="All Customers"
-                count={unclaimedCustomers.length}
-              />
-              <TabButton
-                active={activeTab === "accounts"}
-                onClick={() => setActiveTab("accounts")}
-                icon={<CreditCard className="w-4 h-4" />}
-                label="Managed Accounts"
-                count={accounts.length}
-              />
-              <TabButton
-                active={activeTab === "pending-loans"}
-                onClick={() => setActiveTab("pending-loans")}
-                icon={<FileText className="w-4 h-4" />}
-                label="Loans"
-                count={totalLoans}
-              />
-              <TabButton
-                active={activeTab === "deposit"}
-                onClick={() => setActiveTab("deposit")}
-                icon={<DollarSign className="w-4 h-4" />}
-                label="Deposit Money"
-              />
+              {([
+                { id: "customers", label: "Customers", icon: Eye, badge: pendingCustomers },
+                { id: "accounts", label: "Accounts", icon: CreditCard, badge: pendingAccounts },
+                { id: "loans", label: "Loans", icon: FileText, badge: pendingLoans },
+                { id: "deposit", label: "Deposit", icon: DollarSign, badge: undefined },
+              ] satisfies { id: TabType; label: string; icon: React.ElementType; badge: number | undefined }[]).map(tab => (
+                <button key={tab.id}
+                  onClick={() => { setActiveTab(tab.id); setSearchTerm(""); }}
+                  className={`px-5 py-3 flex items-center gap-2 border-b-2 transition ${activeTab === tab.id
+                    ? "border-blue-600 text-blue-600"
+                    : "border-transparent text-gray-500 hover:text-gray-700"
+                    }`}>
+                  <tab.icon className="w-4 h-4" />
+                  {tab.label}
+                  {tab.badge ? (
+                    <span className="bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">{tab.badge}</span>
+                  ) : null}
+                </button>
+              ))}
             </nav>
           </div>
 
-          {/* Tab Content */}
           <div className="p-6">
-            {/* All Customers Tab with Filters */}
-            {activeTab === "all-customers" && (
-              <AllCustomersTable
-                customers={filteredCustomers}
-                totalCount={totalCustomers}
-                pendingCount={pendingCustomersCount}
-                approvedCount={approvedCustomersCount}
-                rejectedCount={rejectedCustomersCount}
-                filter={customerFilter}
-                onFilterChange={setCustomerFilter}
-                loading={loading}
-                searchTerm={searchTerm}
-                onSearchChange={setSearchTerm}
-                onApprove={handleApproveCustomer}
-                onReject={handleRejectCustomer}
-                onDelete={handleDeleteRejectedCustomer}
-                showDeleteConfirm={showCustomerDeleteConfirm}
-                setShowDeleteConfirm={setShowCustomerDeleteConfirm}
-                currentUserId={user?.id}
-              />
+
+            {/* ── CUSTOMERS TAB ── */}
+            {activeTab === "customers" && (
+              <div>
+                <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
+                  <h2 className="text-lg font-semibold text-gray-900">Customer Management</h2>
+                  <div className="flex flex-wrap gap-2">
+                    {(["ALL", "PENDING", "MY_CUSTOMERS", "ACTIVE", "REJECTED"] as CustomerFilter[]).map(f => (
+                      <FilterBtn key={f}
+                        label={f === "MY_CUSTOMERS" ? "My Customers" : f}
+                        active={customerFilter === f}
+                        onClick={() => setCustomerFilter(f)} />
+                    ))}
+                  </div>
+                </div>
+
+                <SearchBar value={searchTerm} onChange={setSearchTerm} placeholder="Search by name, email or phone..." />
+
+                {loading ? <Spinner /> : filteredCustomers.length === 0 ? (
+                  <Empty icon={UserCheck} message="No customers found" />
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          {["Name", "Email", "Phone", "City", "Assigned Staff", "Status", "Staff Approval", "Actions"].map(h => (
+                            <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {filteredCustomers.map(c => (
+                          <tr key={c.customer_id} className="hover:bg-gray-50">
+                            <td className="px-4 py-3">
+                              <p className="text-sm font-medium text-gray-900">{c.full_name}</p>
+                              <p className="text-xs text-gray-500">ID: {c.customer_id}</p>
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-500">{c.email}</td>
+                            <td className="px-4 py-3 text-sm text-gray-500">{c.phone}</td>
+                            <td className="px-4 py-3 text-sm text-gray-500">{c.city || "—"}</td>
+                            <td className="px-4 py-3 text-sm text-gray-500">
+                              {c.assigned_staff_name
+                                ? <span className="inline-flex items-center gap-1">
+                                  <UserCheck className="w-3 h-3 text-blue-500" />
+                                  {c.assigned_staff_name}
+                                </span>
+                                : <span className="text-xs text-gray-400 italic">Unassigned</span>
+                              }
+                            </td>
+                            <td className="px-4 py-3"><StatusBadge status={c.status} /></td>
+                            <td className="px-4 py-3">
+                              {c.staff_approval_status
+                                ? <StatusBadge status={c.staff_approval_status} />
+                                : <span className="text-xs text-gray-400">Pending</span>}
+                            </td>
+                            <td className="px-4 py-3">
+                              {/* Unassigned OR assigned-to-me: show approve/reject */}
+                              {(!c.assigned_staff_id || c.assigned_staff_id === Number(user?.id)) &&
+                                c.status === "PENDING" &&
+                                !c.staff_approval_status && (
+                                  <div className="flex flex-wrap gap-1">
+                                    <Btn label="Approve" color="green" onClick={() => handleApproveCustomer(c.customer_id)} />
+                                    {rejectingId === c.customer_id ? (
+                                      <div className="flex gap-1 items-center">
+                                        <input type="text" placeholder="Reason (required)"
+                                          value={rejectRemarks}
+                                          onChange={e => setRejectRemarks(e.target.value)}
+                                          className="border border-gray-300 rounded px-2 py-1 text-xs w-36" />
+                                        <Btn label="Confirm" color="red" onClick={() => handleRejectCustomer(c.customer_id)} />
+                                        <Btn label="Cancel" color="gray" onClick={() => { setRejectingId(null); setRejectRemarks(""); }} />
+                                      </div>
+                                    ) : (
+                                      <Btn label="Reject" color="red" onClick={() => setRejectingId(c.customer_id)} />
+                                    )}
+                                  </div>
+                                )}
+
+                              {c.staff_approval_status === "APPROVED" &&
+                                c.status !== "ACTIVE" &&
+                                c.admin_approval_status !== "APPROVED" && (
+                                  <span className="text-xs text-blue-600 font-medium">Awaiting Admin</span>
+                                )}
+
+                              {/* Only show if assigned to a DIFFERENT staff member */}
+                              {c.assigned_staff_id !== null &&
+                                c.assigned_staff_id !== Number(user?.id) && (
+                                  <span className="text-xs text-gray-400">Not assigned to you</span>
+                                )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
             )}
 
-            {/* Loans Tab with Filters */}
-            {activeTab === "pending-loans" && (
-              <LoansTable
-                loans={filteredLoans}
-                totalCount={totalLoans}
-                pendingCount={pendingLoansCount}
-                approvedCount={approvedLoansCount}
-                rejectedCount={rejectedLoansCount}
-                loading={loading}
-                filter={loanFilter}
-                onFilterChange={setLoanFilter}
-                onApprove={handleApproveLoan}
-                onReject={handleRejectLoan}
-                onDelete={handleDeleteRejectedLoan}
-                showDeleteConfirm={showDeleteConfirm}
-                setShowDeleteConfirm={setShowDeleteConfirm}
-              />
-            )}
-
-            {/* Deposit Tab */}
-            {activeTab === "deposit" && (
-              <DepositForm
-                accounts={filteredAccounts}
-                showForm={showDepositForm}
-                setShowForm={setShowDepositForm}
-                depositData={depositData}
-                setDepositData={setDepositData}
-                onDeposit={handleDeposit}
-                loading={loading}
-              />
-            )}
-
-            {/* Accounts Tab */}
+            {/* ── ACCOUNTS TAB ── */}
             {activeTab === "accounts" && (
-              <AccountsTable
-                accounts={filteredAccounts}
-                loading={loading}
-                searchTerm={searchTerm}
-                onSearchChange={setSearchTerm}
-                onApprove={handleApproveAccount}
-                onReject={handleRejectAccount}
-                onDelete={handleDeleteRejectedAccount}
-                showDeleteConfirm={showDeleteConfirm}
-                setShowDeleteConfirm={setShowDeleteConfirm}
-                onDeposit={(accountId: number) => {
-                  setDepositData({
-                    accountId: accountId.toString(),
-                    amount: "",
-                    description: "",
-                  });
-                  setActiveTab("deposit");
-                  setShowDepositForm(true);
-                }}
-              />
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900 mb-4">Account Management</h2>
+                <SearchBar value={searchTerm} onChange={setSearchTerm} placeholder="Search by customer or account number..." />
+
+                {loading ? <Spinner /> : filteredAccounts.length === 0 ? (
+                  <Empty icon={CreditCard} message="No accounts found" />
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          {["Customer", "Account No.", "Type", "Balance", "Status", "Opened", "Actions"].map(h => (
+                            <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {filteredAccounts.map(a => (
+                          <tr key={a.account_id} className="hover:bg-gray-50">
+                            <td className="px-4 py-3 text-sm font-medium text-gray-900">{a.customer_name}</td>
+                            <td className="px-4 py-3 text-sm font-mono text-gray-700">{a.account_number}</td>
+                            <td className="px-4 py-3">
+                              <span className="px-2 py-1 text-xs rounded-full bg-purple-100 text-purple-800">
+                                {a.account_type}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-sm font-semibold text-gray-900">{formatCurrency(a.balance)}</td>
+                            <td className="px-4 py-3"><StatusBadge status={a.status} /></td>
+                            <td className="px-4 py-3 text-sm text-gray-500">{formatDate(a.opened_date)}</td>
+                            <td className="px-4 py-3">
+                              <div className="flex gap-1">
+                                {a.status === "PENDING" && (
+                                  <>
+                                    <Btn label="Approve" color="green" onClick={() => handleApproveAccount(a.account_id)} />
+                                    <Btn label="Reject" color="red" onClick={() => handleRejectAccount(a.account_id)} />
+                                  </>
+                                )}
+                                {a.status === "ACTIVE" && (
+                                  <Btn label="Deposit" color="blue"
+                                    onClick={() => {
+                                      setDepositData({ accountId: a.account_id.toString(), amount: "", description: "" });
+                                      setActiveTab("deposit");
+                                    }} />
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
             )}
+
+            {/* ── LOANS TAB ── */}
+            {activeTab === "loans" && (
+              <div>
+                <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
+                  <h2 className="text-lg font-semibold text-gray-900">Loan Management</h2>
+                  <div className="flex flex-wrap gap-2">
+                    {(["ALL", "PENDING", "ACTIVE", "REJECTED"] as LoanFilter[]).map(f => (
+                      <FilterBtn key={f} label={f} active={loanFilter === f} onClick={() => setLoanFilter(f)} />
+                    ))}
+                  </div>
+                </div>
+
+                {loading ? <Spinner /> : filteredLoans.length === 0 ? (
+                  <Empty icon={FileText} message="No loans found" />
+                ) : (
+                  <div className="space-y-4">
+                    {filteredLoans.map(loan => {
+                      const schedule = repaymentSchedules[loan.loan_id];
+                      const canViewSchedule = loan.status === "ACTIVE" || loan.status === "CLOSED";
+                      const paidCount = schedule ? schedule.filter(r => r.status === "PAID").length : 0;
+                      const overdueCount = schedule ? schedule.filter(r => r.status === "OVERDUE").length : 0;
+
+                      // Only show "Awaiting Admin" if:
+                      // - staff has approved, AND
+                      // - admin has NOT yet approved, AND
+                      // - loan is still PENDING (not already ACTIVE/CLOSED/etc.)
+                      const isTerminal = ["ACTIVE", "CLOSED", "DEFAULTED"].includes(loan.status?.toUpperCase());
+                      const showAwaitingAdmin =
+                        !isTerminal &&
+                        loan.staff_approval_status === "APPROVED" &&
+                        loan.admin_approval_status?.toUpperCase() !== "APPROVED";
+
+                      return (
+                        <div key={loan.loan_id} className="border border-gray-200 rounded-xl p-5 hover:shadow-md transition">
+                          <div className="flex justify-between items-start">
+                            <div className="flex-1">
+                              <div className="flex items-center gap-3 mb-3">
+                                <StatusBadge status={loan.status} />
+                                <span className="text-sm text-gray-500">Loan #{loan.loan_id}</span>
+                                {loan.staff_approval_status && (
+                                  <span className="text-xs text-gray-500">
+                                    Staff: <StatusBadge status={loan.staff_approval_status} />
+                                  </span>
+                                )}
+                              </div>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                <Info label="Customer" value={loan.customer_name} />
+                                <Info label="Type" value={loan.loan_type} />
+                                <Info label="Amount" value={formatCurrency(loan.loan_amount)} />
+                                <Info label="Interest" value={`${loan.interest_rate}%`} />
+                                <Info label="Duration" value={`${loan.duration_months} months`} />
+                                {loan.approved_amount && (
+                                  <Info label="Approved Amt" value={formatCurrency(loan.approved_amount)} />
+                                )}
+                              </div>
+                              <p className="text-xs text-gray-400 mt-2">Applied: {formatDate(loan.created_at)}</p>
+                              {loan.staff_approval_remarks && (
+                                <div className="mt-2 p-2 bg-yellow-50 rounded text-xs text-yellow-700">
+                                  Remarks: {loan.staff_approval_remarks}
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex flex-col items-end gap-2 ml-4">
+                              {loan.status === "PENDING" && !loan.staff_approval_status && (
+                                <div className="flex gap-2">
+                                  <Btn label="Approve" color="green" onClick={() => handleApproveLoan(loan.loan_id)} />
+                                  <Btn label="Reject" color="red" onClick={() => handleRejectLoan(loan.loan_id)} />
+                                </div>
+                              )}
+                              {showAwaitingAdmin && (
+                                <span className="text-xs text-blue-600 font-medium">Awaiting Admin</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Repayment timeline — for ACTIVE and CLOSED loans */}
+                          {canViewSchedule && (
+                            <div className="mt-4">
+                              <button
+                                onClick={() => loadRepaymentSchedule(loan.loan_id)}
+                                disabled={loadingScheduleId === loan.loan_id}
+                                className="w-full flex items-center justify-between p-3 bg-blue-50 rounded-xl text-blue-700 hover:bg-blue-100 transition font-medium text-sm"
+                              >
+                                <div className="flex items-center gap-2">
+                                  <Calendar className="w-4 h-4" />
+                                  <span>Repayment Timeline ({loan.duration_months} installments)</span>
+                                  {schedule && (
+                                    <span className="text-xs bg-blue-100 px-2 py-0.5 rounded-full">
+                                      {paidCount} paid{overdueCount > 0 ? ` • ${overdueCount} overdue` : ""}
+                                    </span>
+                                  )}
+                                </div>
+                                {loadingScheduleId === loan.loan_id
+                                  ? <RefreshCw className="w-4 h-4 animate-spin" />
+                                  : schedule ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                              </button>
+
+                              {schedule && schedule.length > 0 && (
+                                <div className="mt-2 border rounded-xl overflow-hidden">
+                                  {/* Auto-deduct notice */}
+                                  <div className={`px-4 py-2 text-xs font-medium flex items-center gap-2 border-b ${loan.auto_deduct ? "bg-green-50 text-green-800" : "bg-amber-50 text-amber-800"}`}>
+                                    {loan.auto_deduct
+                                      ? <><CheckCircle className="w-3.5 h-3.5 flex-shrink-0" /> Auto-deduction ON — EMI will be deducted automatically on each due date. Customer can pay early to avoid deduction.</>
+                                      : <><AlertCircle className="w-3.5 h-3.5 flex-shrink-0" /> Manual payment — Customer must pay each EMI before the due date.</>
+                                    }
+                                  </div>
+
+                                  {/* Summary bar */}
+                                  <div className="bg-gray-50 px-4 py-3 border-b grid grid-cols-3 gap-2 text-center text-xs">
+                                    <div>
+                                      <div className="text-gray-500">Paid</div>
+                                      <div className="font-bold text-green-600">{paidCount}/{schedule.length}</div>
+                                    </div>
+                                    <div>
+                                      <div className="text-gray-500">Overdue</div>
+                                      <div className="font-bold text-red-600">{overdueCount}</div>
+                                    </div>
+                                    <div>
+                                      <div className="text-gray-500">Remaining</div>
+                                      <div className="font-bold text-blue-600">
+                                        PKR {schedule.filter(r => r.status !== "PAID").reduce((s, r) => s + Number(r.amount), 0).toLocaleString()}
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  {/* Timeline rows */}
+                                  <div className="max-h-72 overflow-y-auto divide-y divide-gray-100">
+                                    {schedule.map(r => {
+                                      const isPaid = r.status === "PAID";
+                                      const isOverdue = r.status === "OVERDUE";
+                                      const isPending = !isPaid && !isOverdue;
+                                      return (
+                                        <div key={r.repayment_id}
+                                          className={`flex items-center gap-3 px-4 py-3 ${isPaid ? "bg-green-50" : isOverdue ? "bg-red-50" : "bg-white"}`}>
+                                          {/* Timeline dot */}
+                                          <div className={`w-3 h-3 rounded-full flex-shrink-0 ${isPaid ? "bg-green-500" : isOverdue ? "bg-red-500" : "bg-gray-300"}`} />
+                                          <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                              <span className="text-sm font-medium text-gray-700">
+                                                Installment #{r.installment_no}
+                                              </span>
+                                              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${isPaid ? "bg-green-100 text-green-700" : isOverdue ? "bg-red-100 text-red-700" : "bg-yellow-100 text-yellow-700"}`}>
+                                                {r.status}
+                                              </span>
+                                            </div>
+                                            <div className="text-xs text-gray-500 mt-0.5 space-y-0.5">
+                                              {isPaid ? (
+                                                <>
+                                                  <span>Due: {formatDate(r.due_date)}</span>
+                                                  {r.paid_date && (
+                                                    <span className="ml-2 text-green-600 font-medium">• Paid: {formatDate(r.paid_date)}</span>
+                                                  )}
+                                                </>
+                                              ) : isPending ? (
+                                                <>
+                                                  <span className="font-medium text-gray-700">
+                                                    {loan.auto_deduct
+                                                      ? <>Auto-deduct on: <span className="text-blue-600">{formatDate(r.due_date)}</span></>
+                                                      : <>Pay by: <span className="text-orange-600">{formatDate(r.due_date)}</span></>
+                                                    }
+                                                  </span>
+                                                </>
+                                              ) : (
+                                                <span className="text-red-600 font-medium">Was due: {formatDate(r.due_date)}</span>
+                                              )}
+                                            </div>
+                                          </div>
+                                          <div className={`text-sm font-bold flex-shrink-0 ${isPaid ? "text-green-600" : isOverdue ? "text-red-600" : "text-gray-900"}`}>
+                                            {formatCurrency(r.amount)}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── DEPOSIT TAB ── */}
+            {activeTab === "deposit" && (
+              <div className="max-w-md">
+                <h2 className="text-lg font-semibold text-gray-900 mb-4">Deposit to Customer Account</h2>
+                <form onSubmit={handleDeposit} className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Account</label>
+                    <select value={depositData.accountId}
+                      onChange={e => setDepositData({ ...depositData, accountId: e.target.value })}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500"
+                      required>
+                      <option value="">Select account...</option>
+                      {accounts.filter(a => a.status === "ACTIVE").map(a => (
+                        <option key={a.account_id} value={a.account_id}>
+                          {a.customer_name} — {a.account_number} ({a.account_type})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Amount (PKR)</label>
+                    <input type="number" min="1" step="0.01"
+                      value={depositData.amount}
+                      onChange={e => setDepositData({ ...depositData, amount: e.target.value })}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500"
+                      required />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Description (optional)</label>
+                    <input type="text"
+                      value={depositData.description}
+                      onChange={e => setDepositData({ ...depositData, description: e.target.value })}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500"
+                      placeholder="e.g. Cash deposit" />
+                  </div>
+                  <div className="flex gap-3">
+                    <button type="submit" disabled={loading}
+                      className="flex-1 bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm font-medium">
+                      {loading ? "Processing..." : "Confirm Deposit"}
+                    </button>
+                    <button type="button"
+                      onClick={() => setDepositData({ accountId: "", amount: "", description: "" })}
+                      className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 text-sm">
+                      Clear
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
           </div>
         </div>
       </main>
 
-      {/* Profile Modal */}
-      <ProfileModal
-        isOpen={showProfileModal}
-        onClose={() => setShowProfileModal(false)}
-        user={user}
-        onProfileUpdate={handleProfileUpdate}
-      />
+      <ProfileModal isOpen={showProfileModal} onClose={() => setShowProfileModal(false)}
+        user={user} onProfileUpdate={fetchAll} />
     </div>
   );
 }
 
-// ==================== Subcomponents (keep all your existing subcomponents here) ====================
-// QuickStatCard, TabButton, AllCustomersTable, LoansTable, AccountsTable, DepositForm, LoadingSpinner, EmptyState, FilterButton, ActionButton
-// ... (all your existing subcomponents remain exactly the same)
-
-// ==================== Subcomponents ====================
-
-const QuickStatCard = ({ label, value, icon }: any) => (
+// ================================================================
+//  HELPER COMPONENTS
+// ================================================================
+const StatCard = ({ label, value, icon }: any) => (
   <div className="bg-white rounded-lg shadow p-4">
     <div className="flex items-center justify-between">
       <div>
-        <p className="text-xs text-gray-500">{label}</p>
+        <p className="text-xs text-gray-500 mb-1">{label}</p>
         <p className="text-xl font-bold text-gray-900">{value}</p>
       </div>
       {icon}
@@ -718,762 +802,54 @@ const QuickStatCard = ({ label, value, icon }: any) => (
   </div>
 );
 
-const TabButton = ({ active, onClick, icon, label, count }: any) => (
-  <button
-    onClick={onClick}
-    className={`px-4 py-3 flex items-center gap-2 border-b-2 transition ${
-      active
-        ? "border-blue-600 text-blue-600"
-        : "border-transparent text-gray-500 hover:text-gray-700"
-    }`}
-  >
-    {icon}
+const SearchBar = ({ value, onChange, placeholder }: any) => (
+  <div className="mb-4 relative">
+    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-4 h-4" />
+    <input type="text" value={value} onChange={e => onChange(e.target.value)}
+      placeholder={placeholder}
+      className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" />
+  </div>
+);
+
+const FilterBtn = ({ label, active, onClick }: any) => (
+  <button onClick={onClick}
+    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${active ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+      }`}>
     {label}
-    {count > 0 && (
-      <span className="bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">
-        {count}
-      </span>
-    )}
   </button>
 );
 
-// Enhanced All Customers Table Component with Filters
-const AllCustomersTable = ({
-  customers,
-  totalCount,
-  pendingCount,
-  approvedCount,
-  rejectedCount,
-  filter,
-  onFilterChange,
-  loading,
-  searchTerm,
-  onSearchChange,
-  onApprove,
-  onReject,
-  onDelete,
-  showDeleteConfirm,
-  setShowDeleteConfirm,
-  currentUserId,
-}: any) => {
-  const customerArray = Array.isArray(customers) ? customers : [];
-
-  return (
-    <div>
-      <div className="flex justify-between items-center mb-6">
-        <h3 className="text-lg font-semibold text-gray-900">
-          Customer Management
-        </h3>
-
-        {/* Filter Buttons */}
-        <div className="flex gap-2">
-          <FilterButton
-            label="All"
-            count={totalCount}
-            active={filter === "all"}
-            onClick={() => onFilterChange("all")}
-            color="blue"
-          />
-          <FilterButton
-            label="Pending"
-            count={pendingCount}
-            active={filter === "pending"}
-            onClick={() => onFilterChange("pending")}
-            color="yellow"
-          />
-          <FilterButton
-            label="Approved"
-            count={approvedCount}
-            active={filter === "approved"}
-            onClick={() => onFilterChange("approved")}
-            color="green"
-          />
-          <FilterButton
-            label="Rejected"
-            count={rejectedCount}
-            active={filter === "rejected"}
-            onClick={() => onFilterChange("rejected")}
-            color="red"
-          />
-        </div>
-      </div>
-
-      {/* Search Bar */}
-      <div className="mb-4 flex gap-4">
-        <div className="flex-1 relative">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-          <input
-            type="text"
-            placeholder="Search customers by name, email or phone..."
-            value={searchTerm}
-            onChange={(e) => onSearchChange(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-          />
-        </div>
-      </div>
-
-      {loading ? (
-        <LoadingSpinner />
-      ) : customerArray.length === 0 ? (
-        <EmptyState icon={UserCheck} message={`No ${filter} customers found`} />
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Name
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Email
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Phone
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Associated User
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Status
-                </th>
-                {/* ✅ Only show Actions column when filter is "pending" */}
-                {filter === "pending" && (
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Actions
-                  </th>
-                )}
-              </tr>
-            </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
-              {customerArray.map((customer: any) => {
-                const userApproved = Number(customer.is_user_approved);
-                const adminApproved = Number(customer.is_admin_approved);
-
-                const isUnclaimed = !customer.approved_by_user;
-                const isMyCustomer =
-                  customer.approved_by_user === currentUserId;
-                const isFullyApproved =
-                  userApproved === 1 && adminApproved === 1;
-                const isRejected =
-                  customer.approved_by_user &&
-                  userApproved === 0 &&
-                  adminApproved === 0;
-
-                let statusText = "Pending";
-                let statusColor = "bg-yellow-100 text-yellow-800";
-
-                if (isFullyApproved) {
-                  statusText = "Approved";
-                  statusColor = "bg-green-100 text-green-800";
-                } else if (isRejected) {
-                  statusText = "Rejected";
-                  statusColor = "bg-red-100 text-red-800";
-                }
-
-                return (
-                  <tr key={customer.customer_id} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-gray-900">
-                        {customer.customer_name}
-                      </div>
-                      <div className="text-xs text-gray-500">
-                        ID: {customer.customer_id}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-500">
-                        {customer.email || "—"}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-500">
-                        {customer.phone || "—"}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      {customer.approved_by_user ? (
-                        <span className="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-800">
-                          User #{customer.approved_by_user}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-gray-400">—</span>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span
-                        className={`px-2 py-1 text-xs rounded-full ${statusColor}`}
-                      >
-                        {statusText}
-                      </span>
-                    </td>
-
-                    {/* ✅ Only show Actions cell when filter is "pending" */}
-                    {filter === "pending" && (
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                        {/* Show Approve/Reject ONLY for unclaimed customers when in pending filter */}
-                        {isUnclaimed && (
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => onApprove(customer.customer_id)}
-                              className="text-green-600 hover:text-green-900 bg-green-50 px-3 py-1 rounded-lg hover:bg-green-100"
-                            >
-                              Approve
-                            </button>
-                            <button
-                              onClick={() => onReject(customer.customer_id)}
-                              className="text-red-600 hover:text-red-900 bg-red-50 px-3 py-1 rounded-lg hover:bg-red-100"
-                            >
-                              Reject
-                            </button>
-                          </div>
-                        )}
-
-                        {/* Show delete button for rejected customers (visible in all filters) */}
-                        {isRejected && isMyCustomer && (
-                          <>
-                            {showDeleteConfirm === customer.customer_id ? (
-                              <div className="flex gap-2">
-                                <button
-                                  onClick={() => onDelete(customer.customer_id)}
-                                  className="text-red-600 hover:text-red-900 bg-red-50 px-3 py-1 rounded-lg hover:bg-red-100"
-                                >
-                                  Confirm
-                                </button>
-                                <button
-                                  onClick={() => setShowDeleteConfirm(null)}
-                                  className="text-gray-600 hover:text-gray-900 bg-gray-50 px-3 py-1 rounded-lg hover:bg-gray-100"
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                onClick={() =>
-                                  setShowDeleteConfirm(customer.customer_id)
-                                }
-                                className="text-red-600 hover:text-red-900 bg-red-50 px-3 py-1 rounded-lg hover:bg-red-100 transition flex items-center gap-1"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                                Delete
-                              </button>
-                            )}
-                          </>
-                        )}
-                      </td>
-                    )}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-};
-// Enhanced Loans Table Component
-const LoansTable = ({
-  loans,
-  totalCount,
-  pendingCount,
-  approvedCount,
-  rejectedCount,
-  loading,
-  filter,
-  onFilterChange,
-  onApprove,
-  onReject,
-  onDelete,
-  showDeleteConfirm,
-  setShowDeleteConfirm,
-}: any) => {
-  const loansArray = Array.isArray(loans) ? loans : [];
-
-  return (
-    <div>
-      <div className="flex justify-between items-center mb-6">
-        <h3 className="text-lg font-semibold text-gray-900">Loan Management</h3>
-
-        {/* Filter Buttons */}
-        <div className="flex gap-2">
-          <FilterButton
-            label="All"
-            count={totalCount}
-            active={filter === "all"}
-            onClick={() => onFilterChange("all")}
-            color="blue"
-          />
-          <FilterButton
-            label="Pending"
-            count={pendingCount}
-            active={filter === "pending"}
-            onClick={() => onFilterChange("pending")}
-            color="yellow"
-          />
-          <FilterButton
-            label="Approved"
-            count={approvedCount}
-            active={filter === "approved"}
-            onClick={() => onFilterChange("approved")}
-            color="green"
-          />
-          <FilterButton
-            label="Rejected"
-            count={rejectedCount}
-            active={filter === "rejected"}
-            onClick={() => onFilterChange("rejected")}
-            color="red"
-          />
-        </div>
-      </div>
-
-      {loading ? (
-        <LoadingSpinner />
-      ) : loansArray.length === 0 ? (
-        <EmptyState icon={FileText} message={`No ${filter} loans found`} />
-      ) : (
-        <div className="grid grid-cols-1 gap-4">
-          {loansArray.map((loan: any) => {
-            const statusBadge = getStatusBadge(loan.status);
-            return (
-              <div
-                key={loan.loan_id}
-                className="bg-white rounded-xl shadow-sm border p-6 hover:shadow-md transition"
-              >
-                <div className="flex justify-between items-start">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-3">
-                      <span
-                        className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium ${statusBadge.bg} ${statusBadge.text}`}
-                      >
-                        {statusBadge.icon}
-                        {loan.status}
-                      </span>
-                      <span className="text-sm text-gray-500">
-                        Loan #{loan.loan_id}
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                      <div>
-                        <p className="text-xs text-gray-500">Customer</p>
-                        <p className="text-sm font-medium text-gray-900">
-                          {loan.customer_name}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-gray-500">Loan Type</p>
-                        <p className="text-sm font-medium text-gray-900">
-                          {loan.loan_type}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-gray-500">Amount</p>
-                        <p className="text-sm font-semibold text-gray-900">
-                          ${loan.loan_amount?.toLocaleString()}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-gray-500">Interest Rate</p>
-                        <p className="text-sm font-medium text-gray-900">
-                          {loan.interest_rate}%
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="mt-3 text-xs text-gray-500">
-                      Applied: {new Date(loan.created_at).toLocaleDateString()}
-                      {loan.approved_at &&
-                        ` • Approved: ${new Date(loan.approved_at).toLocaleDateString()}`}
-                      {loan.rejected_at &&
-                        ` • Rejected: ${new Date(loan.rejected_at).toLocaleDateString()}`}
-                    </div>
-
-                    {loan.rejection_reason && (
-                      <div className="mt-3 p-3 bg-red-50 rounded-lg">
-                        <p className="text-xs text-red-700">
-                          <span className="font-medium">Rejection Reason:</span>{" "}
-                          {loan.rejection_reason}
-                        </p>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex gap-2 ml-4">
-                    {loan.status?.toLowerCase() === "pending" && (
-                      <>
-                        <ActionButton
-                          onClick={() => onApprove(loan.loan_id)}
-                          color="green"
-                          label="Approve"
-                        />
-                        <ActionButton
-                          onClick={() => onReject(loan.loan_id)}
-                          color="red"
-                          label="Reject"
-                        />
-                      </>
-                    )}
-
-                    {loan.status?.toLowerCase() === "rejected" && (
-                      <>
-                        {showDeleteConfirm === loan.loan_id ? (
-                          <div className="flex gap-2">
-                            <ActionButton
-                              onClick={() => onDelete(loan.loan_id)}
-                              color="red"
-                              label="Confirm"
-                            />
-                            <ActionButton
-                              onClick={() => setShowDeleteConfirm(null)}
-                              color="gray"
-                              label="Cancel"
-                            />
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => setShowDeleteConfirm(loan.loan_id)}
-                            className="px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition flex items-center gap-2"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                            Delete
-                          </button>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-};
-
-// Accounts Table Component
-const AccountsTable = ({
-  accounts,
-  loading,
-  searchTerm,
-  onSearchChange,
-  onApprove,
-  onReject,
-  onDelete,
-  showDeleteConfirm,
-  setShowDeleteConfirm,
-  onDeposit,
-}: any) => {
-  const accountsArray = Array.isArray(accounts) ? accounts : [];
-
-  return (
-    <div>
-      <h3 className="text-lg font-semibold mb-4">
-        Customer Accounts Under Your Management
-      </h3>
-
-      {/* Search Bar */}
-      <div className="mb-4 flex gap-4">
-        <div className="flex-1 relative">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-          <input
-            type="text"
-            placeholder="Search by customer name or account number..."
-            value={searchTerm}
-            onChange={(e) => onSearchChange(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-          />
-        </div>
-      </div>
-
-      {loading ? (
-        <LoadingSpinner />
-      ) : accountsArray.length === 0 ? (
-        <EmptyState
-          icon={CreditCard}
-          message="No accounts found under your management"
-        />
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Customer
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Account Number
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Type
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Balance
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Status
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Opened
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
-              {accountsArray.map((account: any) => (
-                <tr key={account.account_id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm font-medium text-gray-900">
-                      {account.customer_name}
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm font-mono text-gray-900">
-                      {account.account_id}
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className="px-2 py-1 text-xs rounded-full bg-purple-100 text-purple-800">
-                      {account.account_type}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm font-semibold text-gray-900">
-                      ${account.balance?.toLocaleString()}
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span
-                      className={`inline-flex items-center gap-1 px-2 py-1 text-xs rounded-full ${
-                        getStatusBadge(account.status).bg
-                      } ${getStatusBadge(account.status).text}`}
-                    >
-                      {getStatusBadge(account.status).icon}
-                      {account.status}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                    {formatDate(account.opened_date)}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                    {(account.status === "PENDING" ||
-                      account.status === "INACTIVE") && (
-                      <div className="flex gap-2">
-                        <ActionButton
-                          onClick={() => onApprove(account.account_id)}
-                          color="green"
-                          label="Approve"
-                        />
-                        <ActionButton
-                          onClick={() => onReject(account.account_id)}
-                          color="red"
-                          label="Reject"
-                        />
-                      </div>
-                    )}
-
-                    {account.status === "ACTIVE" && (
-                      <button
-                        onClick={() => onDeposit(account.account_id)}
-                        className="text-blue-600 hover:text-blue-900 bg-blue-50 px-3 py-1 rounded-lg hover:bg-blue-100 transition flex items-center gap-1"
-                      >
-                        <DollarSign className="w-4 h-4" />
-                        Deposit
-                      </button>
-                    )}
-
-                    {account.status === "REJECTED" && (
-                      <>
-                        {showDeleteConfirm === account.account_id ? (
-                          <div className="flex gap-2">
-                            <ActionButton
-                              onClick={() => onDelete(account.account_id)}
-                              color="red"
-                              label="Confirm"
-                            />
-                            <ActionButton
-                              onClick={() => setShowDeleteConfirm(null)}
-                              color="gray"
-                              label="Cancel"
-                            />
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() =>
-                              setShowDeleteConfirm(account.account_id)
-                            }
-                            className="text-red-600 hover:text-red-900 bg-red-50 px-3 py-1 rounded-lg hover:bg-red-100 transition flex items-center gap-1"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                            Delete
-                          </button>
-                        )}
-                      </>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-};
-
-// Deposit Form Component
-const DepositForm = ({
-  accounts,
-  showForm,
-  setShowForm,
-  depositData,
-  setDepositData,
-  onDeposit,
-  loading,
-}: any) => {
-  const accountsArray = Array.isArray(accounts) ? accounts : [];
-
-  return (
-    <div>
-      <h3 className="text-lg font-semibold mb-4">
-        Deposit Money to Customer Account
-      </h3>
-
-      {!showForm ? (
-        <button
-          onClick={() => setShowForm(true)}
-          className="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition flex items-center gap-2"
-        >
-          <DollarSign className="w-5 h-5" />
-          New Deposit
-        </button>
-      ) : (
-        <form onSubmit={onDeposit} className="max-w-md space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Select Account
-            </label>
-            <select
-              value={depositData.accountId}
-              onChange={(e) =>
-                setDepositData({ ...depositData, accountId: e.target.value })
-              }
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-              required
-            >
-              <option value="">Choose account...</option>
-              {accountsArray
-                .filter((a: any) => a.status?.toUpperCase() !== "REJECTED")
-                .map((account: any) => (
-                  <option key={account.account_id} value={account.account_id}>
-                    {account.customer_name} - Account #{account.account_id}
-                  </option>
-                ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Amount ($)
-            </label>
-            <input
-              type="number"
-              min="0.01"
-              step="0.01"
-              value={depositData.amount}
-              onChange={(e) =>
-                setDepositData({ ...depositData, amount: e.target.value })
-              }
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-              required
-            />
-          </div>
-
-          <div className="flex gap-3">
-            <button
-              type="submit"
-              disabled={loading}
-              className="flex-1 bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 transition disabled:opacity-50"
-            >
-              {loading ? "Processing..." : "Confirm Deposit"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowForm(false)}
-              className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 transition"
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
-      )}
-    </div>
-  );
-};
-
-// Helper Components
-const LoadingSpinner = () => (
-  <div className="text-center py-12">
-    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-  </div>
-);
-
-const EmptyState = ({ icon: Icon, message }: any) => (
-  <div className="text-center py-12 bg-gray-50 rounded-lg">
-    <Icon className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-    <p className="text-gray-500">{message}</p>
-  </div>
-);
-
-const FilterButton = ({ label, count, active, onClick, color }: any) => {
-  const colorClasses: Record<string, string> = {
-    blue: active
-      ? "bg-blue-600 text-white"
-      : "bg-blue-50 text-blue-700 hover:bg-blue-100",
-    yellow: active
-      ? "bg-yellow-600 text-white"
-      : "bg-yellow-50 text-yellow-700 hover:bg-yellow-100",
-    green: active
-      ? "bg-green-600 text-white"
-      : "bg-green-50 text-green-700 hover:bg-green-100",
-    red: active
-      ? "bg-red-600 text-white"
-      : "bg-red-50 text-red-700 hover:bg-red-100",
-    gray: active
-      ? "bg-gray-600 text-white"
-      : "bg-gray-100 text-gray-700 hover:bg-gray-200",
+const Btn = ({ label, color, onClick }: any) => {
+  const colors: Record<string, string> = {
+    green: "bg-green-50 text-green-700 hover:bg-green-100",
+    red: "bg-red-50 text-red-700 hover:bg-red-100",
+    gray: "bg-gray-100 text-gray-700 hover:bg-gray-200",
+    blue: "bg-blue-50 text-blue-700 hover:bg-blue-100",
   };
-
-  const colorClass = colorClasses[color] || colorClasses.gray;
-
   return (
-    <button
-      onClick={onClick}
-      className={`px-4 py-2 rounded-lg text-sm font-medium transition ${colorClass}`}
-    >
-      {label} ({count})
-    </button>
-  );
-};
-
-const ActionButton = ({ onClick, color, label }: any) => {
-  const colorClasses: Record<string, string> = {
-    green: "bg-green-600 hover:bg-green-700 text-white",
-    red: "bg-red-600 hover:bg-red-700 text-white",
-    gray: "bg-gray-500 hover:bg-gray-600 text-white",
-  };
-
-  const colorClass = colorClasses[color] || colorClasses.gray;
-
-  return (
-    <button
-      onClick={onClick}
-      className={`px-4 py-2 rounded-lg text-sm transition ${colorClass}`}
-    >
+    <button onClick={onClick}
+      className={`px-3 py-1 rounded-lg text-xs font-medium transition ${colors[color] || colors.gray}`}>
       {label}
     </button>
   );
 };
+
+const Info = ({ label, value }: { label: string; value: string }) => (
+  <div>
+    <p className="text-xs text-gray-400">{label}</p>
+    <p className="text-sm font-medium text-gray-900">{value}</p>
+  </div>
+);
+
+const Spinner = () => (
+  <div className="text-center py-12">
+    <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mx-auto" />
+  </div>
+);
+
+const Empty = ({ icon: Icon, message }: any) => (
+  <div className="text-center py-12 bg-gray-50 rounded-lg">
+    <Icon className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+    <p className="text-gray-500">{message}</p>
+  </div>
+);

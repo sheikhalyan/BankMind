@@ -1,75 +1,107 @@
 import { api } from './api';
 
 export const adminService = {
-  // Get all users (for admin dashboard)
-  getAllUsers: async () => {
-    const response = await api.get('/admin/all-users');
-    return response;
+
+  // ----------------------------------------------------------------
+  // DASHBOARD STATS
+  // ----------------------------------------------------------------
+  getStats: async () => {
+    return api.get('/admin/stats');
   },
-  
-  // Get all customers (for admin dashboard)
-  getAllCustomers: async () => {
-    const response = await api.get('/admin/all-customers');
-    return response;
+
+  // ----------------------------------------------------------------
+  // STAFF MANAGEMENT
+  // ----------------------------------------------------------------
+  getAllStaff: async (status?: string) => {
+    const query = status ? `?status=${status}` : '';
+    return api.get(`/admin/staff${query}`);
   },
-  
-  // Get pending users
-  getPendingUsers: async () => {
-    const response = await api.get('/admin/pending-users');
-    return response;
+
+  getPendingStaff: async () => {
+    return api.get('/admin/staff/pending');
   },
-  
-  // Get pending customers
-  getPendingCustomers: async () => {
-    const response = await api.get('/admin/pending-customers');
-    return response;
+
+  getStaffById: async (userId: number) => {
+    return api.get(`/admin/staff/${userId}`);
   },
-  
-  // Get rejected users
-  getRejectedUsers: async () => {
-    const response = await api.get('/admin/rejected-users');
-    return response;
+
+  createStaff: async (data: { fullName: string; email: string; password: string }) => {
+    return api.post('/admin/staff', data);
   },
-  
-  // Get rejected customers
-  getRejectedCustomers: async () => {
-    const response = await api.get('/admin/rejected-customers');
-    return response;
+
+  approveStaff: async (userId: number) => {
+    return api.put(`/admin/staff/${userId}/approve`);
   },
-  
-  // Approve user
-  approveUser: async (userId: number) => {
-    const response = await api.put(`/admin/approve-user/${userId}`);
-    return response;
+
+  rejectStaff: async (userId: number, remarks?: string) => {
+    return api.put(`/admin/staff/${userId}/reject`, { remarks });
   },
-  
-  // Reject user
-  rejectUser: async (userId: number) => {
-    const response = await api.put(`/admin/reject-user/${userId}`);
-    return response;
+
+  suspendStaff: async (userId: number) => {
+    return api.put(`/admin/staff/${userId}/suspend`);
   },
-  
-  // Delete rejected user
-  deleteRejectedUser: async (userId: number) => {
-    const response = await api.delete(`/admin/rejected-user/${userId}`);
-    return response;
+
+  reactivateStaff: async (userId: number) => {
+    return api.put(`/admin/staff/${userId}/reactivate`);
   },
-  
-  // Approve customer (admin approval)
+
+  // ----------------------------------------------------------------
+  // CUSTOMER MANAGEMENT
+  // ----------------------------------------------------------------
+  getAllCustomers: async (status?: string) => {
+    const query = status ? `?status=${status}` : '';
+    return api.get(`/admin/customers${query}`);
+  },
+
+  getPendingAdminApproval: async () => {
+    return api.get('/admin/customers/pending-approval');
+  },
+
   approveCustomer: async (customerId: number) => {
-    const response = await api.put(`/admin/approve-customer/${customerId}`);
-    return response;
+    return api.put(`/admin/customers/${customerId}/approve`);
   },
-  
-  // Reject customer
-  rejectCustomer: async (customerId: number) => {
-    const response = await api.put(`/admin/reject-customer/${customerId}`);
-    return response;
+
+  rejectCustomer: async (customerId: number, remarks?: string) => {
+    return api.put(`/admin/customers/${customerId}/reject`, { remarks });
   },
-  
-  // Delete rejected customer
-  deleteRejectedCustomer: async (customerId: number) => {
-    const response = await api.delete(`/admin/rejected-customer/${customerId}`);
-    return response;
-  }
+
+  suspendCustomer: async (customerId: number) => {
+    return api.put(`/admin/customers/${customerId}/suspend`);
+  },
+
+  reactivateCustomer: async (customerId: number) => {
+    return api.put(`/admin/customers/${customerId}/reactivate`);
+  },
+
+  // ----------------------------------------------------------------
+  // LOAN POLICIES
+  // ----------------------------------------------------------------
+  getLoanPolicies: async () => {
+    return api.get('/admin/loan-policies');
+  },
+
+  createLoanPolicy: async (data: {
+    loan_type: string;
+    min_amount: number;
+    max_amount: number;
+    min_months: number;
+    max_months: number;
+    interest_rate: number;
+  }) => {
+    return api.post('/admin/loan-policies', data);
+  },
+
+  updateLoanPolicy: async (policyId: number, data: {
+    min_amount: number;
+    max_amount: number;
+    min_months: number;
+    max_months: number;
+    interest_rate: number;
+  }) => {
+    return api.put(`/admin/loan-policies/${policyId}`, data);
+  },
+
+  toggleLoanPolicy: async (policyId: number) => {
+    return api.put(`/admin/loan-policies/${policyId}/toggle`);
+  },
 };

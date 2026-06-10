@@ -2,36 +2,57 @@ const express = require('express');
 const router = express.Router();
 
 const {
+  createAccount,
   getPendingAccounts,
+  getAllAccounts,
   approveAccount,
   rejectAccount,
-  createAccount,
-  getUserAccounts,
+  getMyAccounts,
   getAccountsByCustomer,
-  deleteRejectedAccount
+  getUserAssociatedAccounts,
 } = require('../controllers/accountController');
 
 const {
   verifyToken,
-  isUser,
-  isCustomer
+  isStaff,
+  isStaffOrAdmin,
+  isCustomer,
 } = require('../middlewares/authMiddleware');
 
-/* USER ROUTES */
-router.get('/all', verifyToken, isUser, getUserAccounts); 
-router.get('/pending', verifyToken, isUser, getPendingAccounts);
-router.get('/user-associated', verifyToken, isUser, getUserAccounts);
-router.put('/approve/:accountId', verifyToken, isUser, approveAccount);
-router.put('/reject/:accountId', verifyToken, isUser, rejectAccount);
-router.delete('/rejected/:accountId', verifyToken, isUser, deleteRejectedAccount);
+// ─────────────────────────────────────────────────────────────────
+//  CUSTOMER
+// ─────────────────────────────────────────────────────────────────
 
+// POST /api/accounts              — customer creates account request
+router.post('/', verifyToken, isCustomer, createAccount);
 
-/* CUSTOMER ROUTE */
-router.post('/create', verifyToken, isCustomer, createAccount);
+// GET  /api/accounts/my           — customer views their own accounts
+router.get('/my', verifyToken, isCustomer, getMyAccounts);
 
-// Get accounts by customer ID (for customer dashboard)
-router.get('/customer/:customerId', verifyToken, isCustomer, getAccountsByCustomer);
+// ─────────────────────────────────────────────────────────────────
+//  STAFF / ADMIN READ
+// ─────────────────────────────────────────────────────────────────
+
+// GET /api/accounts               — Staff: assigned customers | Admin: all
+router.get('/', verifyToken, isStaffOrAdmin, getAllAccounts);
+
+// GET /api/accounts/pending       — accounts awaiting staff approval
+router.get('/pending', verifyToken, isStaffOrAdmin, getPendingAccounts);
+
+// GET /api/accounts/staff-accounts — all accounts of staff's assigned customers
+router.get('/staff-accounts', verifyToken, isStaff, getUserAssociatedAccounts);
+
+// GET /api/accounts/customer/:customerId
+router.get('/customer/:customerId', verifyToken, isStaffOrAdmin, getAccountsByCustomer);
+
+// ─────────────────────────────────────────────────────────────────
+//  STAFF ACTIONS
+// ─────────────────────────────────────────────────────────────────
+
+// PUT /api/accounts/:accountId/approve
+router.put('/:accountId/approve', verifyToken, isStaff, approveAccount);
+
+// PUT /api/accounts/:accountId/reject
+router.put('/:accountId/reject', verifyToken, isStaff, rejectAccount);
 
 module.exports = router;
-
-

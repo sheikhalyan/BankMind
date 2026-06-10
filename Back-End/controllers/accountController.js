@@ -1,370 +1,427 @@
-const { poolPromise, sql } = require("../config/db");
-const { createNotification, notifyAdmins } = require("../utils/notifications");
+const { getPool, sql } = require('../config/db');
+const CustomerModel = require('../models/Customermodel');
+const {
+  notifyCustomer,
+  notifyStaff,
+  notifyAdmins,
+} = require('../utils/notifications');
 
-/* =========================
-   USER: VIEW ALL ACCOUNTS
-   (Of Customers Approved by This User)
-========================= */
+// ================================================================
+//  HELPER — generate unique account number
+// ================================================================
+const generateAccountNumber = () =>
+  'BM' + Date.now().toString().slice(-10) + Math.floor(Math.random() * 100);
 
-const getUserAccounts = async (req, res) => {
-  try {
-    const userId = req.user.userId;
-
-    const pool = await poolPromise;
-
-    const result = await pool.request().input("userId", sql.Int, userId).query(`
-        SELECT 
-          a.account_id,
-          a.account_type,
-          a.balance,
-          a.status,
-          a.opened_date,
-          c.customer_id,
-          c.customer_name,
-          c.email AS customer_email
-        FROM Accounts a
-        JOIN Customers c 
-          ON a.customer_id = c.customer_id
-        WHERE c.approved_by_user = @userId
-        ORDER BY a.opened_date DESC
-      `);
-
-    res.json(result.recordset);
-  } catch (err) {
-    console.error("Error in getUserAssociatedAccounts:", err);
-    res.status(500).json({ error: err.message });
-  }
-};
-
-/* =========================
-   USER: VIEW PENDING ACCOUNTS
-========================= */
-const getPendingAccounts = async (req, res) => {
-  try {
-    const pool = await poolPromise;
-
-    const result = await pool.request().query(`
-      SELECT 
-        a.account_id,
-        a.account_type,
-        a.status,
-        c.customer_name,
-        c.email,
-        u.full_name AS approved_by
-      FROM Accounts a
-      JOIN Customers c ON a.customer_id = c.customer_id
-      LEFT JOIN Users u ON a.approved_by_user = u.user_id
-      WHERE a.status = 'INACTIVE'
-    `);
-
-    res.json(result.recordset);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-/* =========================
-   USER: APPROVE ACCOUNT
-========================= */
-const approveAccount = async (req, res) => {
-  const { accountId } = req.params;
-  const userId = req.user.userId;
-
-  try {
-    const pool = await poolPromise;
-
-    // ✅ FIRST: Get account and customer info
-    const accountInfoResult = await pool
-      .request()
-      .input("accountId", sql.Int, accountId).query(`
-        SELECT a.customer_id, a.account_type, c.customer_name
-        FROM Accounts a
-        JOIN Customers c ON a.customer_id = c.customer_id
-        WHERE a.account_id = @accountId
-      `);
-
-    if (accountInfoResult.recordset.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Account not found",
-      });
-    }
-
-    const accountInfo = accountInfoResult.recordset[0];
-
-    // ✅ SECOND: Update the account
-    const result = await pool
-      .request()
-      .input("accountId", sql.Int, accountId)
-      .input("userId", sql.Int, userId).query(`
-        UPDATE Accounts
-        SET 
-          status = 'ACTIVE',
-          is_user_approved = 1,
-          approved_by_user = @userId
-        WHERE account_id = @accountId
-          AND status = 'INACTIVE'
-      `);
-
-    if (result.rowsAffected[0] === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Account already processed or does not exist",
-      });
-    }
-
-    // ✅ THIRD: Notify customer about account approval (using accountInfo)
-    await createNotification(
-      accountInfo.customer_id,
-      "ACCOUNT_APPROVED",
-      `Your ${accountInfo.account_type} account has been APPROVED by User #${userId}!`,
-      accountId,
-    );
-
-    res.status(200).json({
-      success: true,
-      message: "Account approved by user",
-      approved_by_user: userId,
-      accountId: accountId,
-    });
-  } catch (err) {
-    console.error("Approve account error:", err);
-    res.status(500).json({
-      success: false,
-      error: err.message,
-    });
-  }
-};
-
-/* =========================
-   USER: REJECT ACCOUNT
-========================= */
-const rejectAccount = async (req, res) => {
-  const { accountId } = req.params;
-  const userId = req.user.userId;
-
-  try {
-    const pool = await poolPromise;
-
-    const result = await pool
-      .request()
-      .input("accountId", sql.Int, accountId)
-      .input("userId", sql.Int, userId).query(`
-        UPDATE Accounts
-        SET 
-          status = 'REJECTED',
-          is_user_approved = 0,
-          rejected_by_user = @userId
-        WHERE account_id = @accountId
-          AND status = 'INACTIVE'
-      `);
-
-    if (result.rowsAffected[0] === 0) {
-      return res.status(400).json({
-        message: "Account already processed or does not exist",
-      });
-    }
-
-    // ✅ Notify customer about account rejection
-    await createNotification(
-      accountInfo.recordset[0].customer_id,
-      "ACCOUNT_REJECTED",
-      `Your ${accountInfo.recordset[0].account_type} account has been REJECTED`,
-      accountId,
-    );
-
-    res.json({
-      message: "Account rejected by user",
-      rejected_by_user: userId,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-/* =========================
-   CUSTOMER: CREATE ACCOUNT
-========================= */
-// Create Account (Customer)
+// ================================================================
+//  1. CUSTOMER — CREATE ACCOUNT
+//     POST /api/accounts
+//     Body: { account_type: 'SAVINGS' | 'CURRENT' }
+//     → Notify assigned staff + admins
+// ================================================================
 const createAccount = async (req, res) => {
   const { account_type } = req.body;
   const customerId = req.user.customerId;
 
+  if (!account_type)
+    return res.status(400).json({ message: 'account_type is required.' });
+
+  const validTypes = ['SAVINGS', 'CURRENT'];
+  if (!validTypes.includes(account_type.toUpperCase()))
+    return res.status(400).json({ message: 'account_type must be SAVINGS or CURRENT.' });
+
   try {
-    const pool = await poolPromise;
+    const pool = await getPool();
+    const customer = await CustomerModel.findById(customerId);
 
-    // ✅ Check existing accounts for this customer
-    const existingAccounts = await pool
-      .request()
-      .input("customerId", sql.Int, customerId).query(`
-        SELECT account_type, status 
-        FROM Accounts 
-        WHERE customer_id = @customerId
+    if (!customer || customer.status !== 'ACTIVE')
+      return res.status(403).json({ message: 'Your account is not active.' });
+
+    // Check max 2 accounts
+    const existing = await pool.request()
+      .input('customer_id', sql.Int, customerId)
+      .query(`SELECT COUNT(*) AS total FROM Accounts WHERE customer_id = @customer_id`);
+
+    if (existing.recordset[0].total >= 2)
+      return res.status(400).json({ message: 'Maximum 2 accounts allowed (1 SAVINGS + 1 CURRENT).' });
+
+    const accountNumber = generateAccountNumber();
+
+    const insertResult = await pool.request()
+      .input('customer_id', sql.Int, customerId)
+      .input('account_number', sql.NVarChar, accountNumber)
+      .input('account_type', sql.NVarChar, account_type.toUpperCase())
+      .query(`
+        INSERT INTO Accounts (customer_id, account_number, account_type, status)
+        OUTPUT INSERTED.account_id
+        VALUES (@customer_id, @account_number, @account_type, 'PENDING')
       `);
 
-    const existingTypes = existingAccounts.recordset.map((a) =>
-      a.account_type.toUpperCase(),
-    );
+    const accountId = insertResult.recordset[0].account_id;
 
-    // ✅ Check if customer already has 2 accounts
-    if (existingAccounts.recordset.length >= 2) {
-      return res.status(400).json({
-        message:
-          "You can only have maximum 2 accounts (1 Savings and 1 Current)",
-      });
-    }
-
-    // ✅ Check if they already have this account type
-    if (existingTypes.includes(account_type.toUpperCase())) {
-      return res.status(400).json({
-        message: `You already have a ${account_type} account. You can only have one Savings and one Current account.`,
-      });
-    }
-
-    // Get customer's associated user
-    const customerResult = await pool
-      .request()
-      .input("customer_id", sql.Int, customerId)
-      .query(
-        `SELECT approved_by_user, customer_name FROM Customers WHERE customer_id = @customer_id`,
-      );
-
-    const customer = customerResult.recordset[0];
-    const associatedUser = customer?.approved_by_user;
-    const customerName = customer?.customer_name || "Customer";
-
-    await pool
-      .request()
-      .input("customerId", sql.Int, customerId)
-      .input("accountType", sql.VarChar, account_type).query(`
-        INSERT INTO Accounts (customer_id, account_type, is_user_approved, status)
-        VALUES (@customerId, @accountType, 0, 'INACTIVE')
-      `);
-
-    // Notify associated user about account creation
-    if (associatedUser) {
-      await createNotification(
-        pool,
-        associatedUser,
-        null,
-        "ACCOUNT_CREATED",
-        `${customerName} created a new ${account_type} account waiting for approval`,
-        null,
-      );
-    }
-
-    res.status(201).json({
-      message: "Account created. Awaiting user approval.",
-      existingAccounts: existingAccounts.recordset.length + 1,
-      maxAllowed: 2,
+    // Notify customer
+    await notifyCustomer({
+      customer_id: customerId,
+      type: 'ACCOUNT_PENDING',
+      message: `Your ${account_type.toUpperCase()} account request has been submitted and is awaiting staff approval.`,
+      related_id: accountId,
+      related_type: 'ACCOUNT',
     });
+
+    // Notify assigned staff
+    if (customer.assigned_staff_id) {
+      await notifyStaff({
+        user_id: customer.assigned_staff_id,
+        type: 'ACCOUNT_PENDING',
+        message: `Customer "${customer.full_name}" requested a new ${account_type.toUpperCase()} account. Awaiting your approval.`,
+        related_id: accountId,
+        related_type: 'ACCOUNT',
+      });
+    }
+
+    // Notify admins
+    await notifyAdmins({
+      type: 'ACCOUNT_PENDING',
+      message: `Customer "${customer.full_name}" requested a new ${account_type.toUpperCase()} account.`,
+      related_id: accountId,
+      related_type: 'ACCOUNT',
+    });
+
+    return res.status(201).json({
+      message: 'Account created successfully. Awaiting staff approval.',
+      account_id: accountId,
+      account_number: accountNumber,
+      account_type: account_type.toUpperCase(),
+    });
+
   } catch (err) {
-    console.error("Create account error:", err);
-    res.status(500).json({ error: err.message });
+    if (err.message?.includes('uq_customer_account_type'))
+      return res.status(400).json({ message: `You already have a ${account_type} account.` });
+    console.error('[createAccount]', err);
+    return res.status(500).json({ error: err.message });
   }
 };
-// Get accounts by customer ID
-const getAccountsByCustomer = async (req, res) => {
-  const customerId = req.params.customerId;
+
+// ================================================================
+//  2. STAFF — GET PENDING ACCOUNTS
+//     GET /api/accounts/pending
+//     Staff → their assigned customers only | Admin → all
+// ================================================================
+const getPendingAccounts = async (req, res) => {
+  const staffId = req.user.userId;
+  const role = req.user.role.toUpperCase();
 
   try {
-    const pool = await poolPromise;
+    const pool = await getPool();
+    const request = pool.request();
 
-    const result = await pool
-      .request()
-      .input("customer_id", sql.Int, customerId).query(`
-        SELECT 
-          account_id as id,
-          account_type as accountType,
-          account_id as accountNumber,
-          balance,
-          status,
-          opened_date as createdAt
-        FROM Accounts
+    let query = `
+      SELECT
+        a.account_id, a.account_number, a.account_type,
+        a.balance, a.status, a.opened_date,
+        c.customer_id, c.full_name AS customer_name,
+        c.email AS customer_email, c.assigned_staff_id
+      FROM  Accounts  a
+      JOIN  Customers c ON c.customer_id = a.customer_id
+      WHERE a.status = 'PENDING'
+    `;
+
+    if (role === 'STAFF') {
+      query += ` AND c.assigned_staff_id = @staff_id`;
+      request.input('staff_id', sql.Int, staffId);
+    }
+
+    query += ` ORDER BY a.opened_date DESC`;
+    const result = await request.query(query);
+    return res.json(result.recordset);
+
+  } catch (err) {
+    console.error('[getPendingAccounts]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// ================================================================
+//  3. GET ALL ACCOUNTS
+//     GET /api/accounts
+//     Staff → their assigned customers | Admin → all
+// ================================================================
+const getAllAccounts = async (req, res) => {
+  const role = req.user.role.toUpperCase();
+  const staffId = req.user.userId;
+
+  try {
+    const pool = await getPool();
+    const request = pool.request();
+
+    let query = `
+      SELECT
+        a.account_id, a.account_number, a.account_type,
+        a.balance, a.status, a.opened_date,
+        c.customer_id, c.full_name AS customer_name,
+        c.email AS customer_email
+      FROM  Accounts  a
+      JOIN  Customers c ON c.customer_id = a.customer_id
+    `;
+
+    if (role === 'STAFF') {
+      query += ` WHERE c.assigned_staff_id = @staff_id`;
+      request.input('staff_id', sql.Int, staffId);
+    }
+
+    query += ` ORDER BY a.opened_date DESC`;
+    const result = await request.query(query);
+    return res.json(result.recordset);
+
+  } catch (err) {
+    console.error('[getAllAccounts]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// ================================================================
+//  4. STAFF — APPROVE ACCOUNT
+//     PUT /api/accounts/:accountId/approve
+//     Staff is final approver for accounts (no admin level needed)
+//     → Notify customer + admins
+// ================================================================
+const approveAccount = async (req, res) => {
+  const { accountId } = req.params;
+  const { remarks } = req.body;
+  const staffId = req.user.userId;
+
+  try {
+    const pool = await getPool();
+    const accResult = await pool.request()
+      .input('account_id', sql.Int, accountId)
+      .query(`
+        SELECT a.account_id, a.account_type, a.status, a.customer_id,
+               c.full_name AS customer_name, c.assigned_staff_id
+        FROM   Accounts  a
+        JOIN   Customers c ON c.customer_id = a.customer_id
+        WHERE  a.account_id = @account_id
+      `);
+
+    const account = accResult.recordset[0];
+    if (!account)
+      return res.status(404).json({ message: 'Account not found.' });
+    if (account.assigned_staff_id !== staffId)
+      return res.status(403).json({ message: 'This customer is not assigned to you.' });
+    if (account.status !== 'PENDING')
+      return res.status(400).json({ message: `Account is already ${account.status}.` });
+
+    await pool.request()
+      .input('account_id', sql.Int, accountId)
+      .input('approver_id', sql.Int, staffId)
+      .input('remarks', sql.NVarChar, remarks || null)
+      .query(`
+        INSERT INTO Account_Approvals
+          (account_id, approver_id, approver_role, status, remarks)
+        VALUES
+          (@account_id, @approver_id, 'STAFF', 'APPROVED', @remarks);
+
+        UPDATE Accounts SET status = 'ACTIVE' WHERE account_id = @account_id;
+      `);
+
+    await Promise.all([
+      notifyCustomer({
+        customer_id: account.customer_id,
+        type: 'ACCOUNT_APPROVED',
+        message: `Your ${account.account_type} account has been approved and is now active.`,
+        related_id: Number(accountId),
+        related_type: 'ACCOUNT',
+      }),
+      notifyAdmins({
+        type: 'ACCOUNT_APPROVED',
+        message: `Customer "${account.customer_name}" ${account.account_type} account approved by staff.`,
+        related_id: Number(accountId),
+        related_type: 'ACCOUNT',
+      }),
+    ]);
+
+    return res.json({ message: 'Account approved successfully.' });
+
+  } catch (err) {
+    console.error('[approveAccount]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// ================================================================
+//  5. STAFF — REJECT ACCOUNT
+//     PUT /api/accounts/:accountId/reject
+//     Body: { remarks }
+//     → Notify customer + admins
+// ================================================================
+const rejectAccount = async (req, res) => {
+  const { accountId } = req.params;
+  const { remarks } = req.body;
+  const staffId = req.user.userId;
+
+  if (!remarks?.trim())
+    return res.status(400).json({ message: 'Rejection reason (remarks) is required.' });
+
+  try {
+    const pool = await getPool();
+    const accResult = await pool.request()
+      .input('account_id', sql.Int, accountId)
+      .query(`
+        SELECT a.account_id, a.account_type, a.status, a.customer_id,
+               c.full_name AS customer_name, c.assigned_staff_id
+        FROM   Accounts  a
+        JOIN   Customers c ON c.customer_id = a.customer_id
+        WHERE  a.account_id = @account_id
+      `);
+
+    const account = accResult.recordset[0];
+    if (!account)
+      return res.status(404).json({ message: 'Account not found.' });
+    if (account.assigned_staff_id !== staffId)
+      return res.status(403).json({ message: 'This customer is not assigned to you.' });
+    if (account.status !== 'PENDING')
+      return res.status(400).json({ message: `Account is already ${account.status}.` });
+
+    await pool.request()
+      .input('account_id', sql.Int, accountId)
+      .input('approver_id', sql.Int, staffId)
+      .input('remarks', sql.NVarChar, remarks)
+      .query(`
+        INSERT INTO Account_Approvals
+          (account_id, approver_id, approver_role, status, remarks)
+        VALUES
+          (@account_id, @approver_id, 'STAFF', 'REJECTED', @remarks);
+
+        UPDATE Accounts SET status = 'REJECTED' WHERE account_id = @account_id;
+      `);
+
+    await Promise.all([
+      notifyCustomer({
+        customer_id: account.customer_id,
+        type: 'ACCOUNT_REJECTED',
+        message: `Your ${account.account_type} account request was rejected. Reason: ${remarks}`,
+        related_id: Number(accountId),
+        related_type: 'ACCOUNT',
+      }),
+      notifyAdmins({
+        type: 'ACCOUNT_REJECTED',
+        message: `Customer "${account.customer_name}" ${account.account_type} account rejected by staff. Reason: ${remarks}`,
+        related_id: Number(accountId),
+        related_type: 'ACCOUNT',
+      }),
+    ]);
+
+    return res.json({ message: 'Account rejected.' });
+
+  } catch (err) {
+    console.error('[rejectAccount]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// ================================================================
+//  6. CUSTOMER — GET MY ACCOUNTS
+//     GET /api/accounts/my
+// ================================================================
+const getMyAccounts = async (req, res) => {
+  const customerId = req.user.customerId;
+
+  try {
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('customer_id', sql.Int, customerId)
+      .query(`
+        SELECT
+          account_id, account_number, account_type,
+          balance, status, opened_date
+        FROM  Accounts
         WHERE customer_id = @customer_id
         ORDER BY opened_date DESC
       `);
 
-    res.json({
-      accounts: result.recordset,
-    });
+    return res.json(result.recordset);
+
   } catch (err) {
-    console.error("Error fetching accounts by customer:", err);
-    res.status(500).json({ error: err.message });
+    console.error('[getMyAccounts]', err);
+    return res.status(500).json({ error: err.message });
   }
 };
 
-/* =========================
-   USER: DELETE REJECTED ACCOUNT
-========================= */
-const deleteRejectedAccount = async (req, res) => {
-  const { accountId } = req.params;
-  const userId = req.user.userId;
+// ================================================================
+//  7. STAFF/ADMIN — GET ACCOUNTS BY CUSTOMER
+//     GET /api/accounts/customer/:customerId
+// ================================================================
+const getAccountsByCustomer = async (req, res) => {
+  const { customerId } = req.params;
+  const role = req.user.role.toUpperCase();
+  const staffId = req.user.userId;
 
   try {
-    const pool = await poolPromise;
+    const pool = await getPool();
 
-    // First verify the account exists and is rejected
-    const checkResult = await pool
-      .request()
-      .input("accountId", sql.Int, accountId).query(`
-        SELECT status, customer_id 
-        FROM Accounts 
-        WHERE account_id = @accountId
+    // Staff can only view their assigned customers
+    if (role === 'STAFF') {
+      const customer = await CustomerModel.findById(customerId);
+      if (!customer || customer.assigned_staff_id !== staffId)
+        return res.status(403).json({ message: 'This customer is not assigned to you.' });
+    }
+
+    const result = await pool.request()
+      .input('customer_id', sql.Int, customerId)
+      .query(`
+        SELECT
+          account_id, account_number, account_type,
+          balance, status, opened_date
+        FROM  Accounts
+        WHERE customer_id = @customer_id
+        ORDER BY opened_date DESC
       `);
 
-    if (checkResult.recordset.length === 0) {
-      return res.status(404).json({ message: "Account not found" });
-    }
+    return res.json(result.recordset);
 
-    const account = checkResult.recordset[0];
-
-    if (account.status !== "REJECTED") {
-      return res.status(400).json({
-        message: "Only rejected accounts can be deleted",
-      });
-    }
-
-    // Verify this user has permission (customer is approved by this user)
-    const permissionCheck = await pool
-      .request()
-      .input("customerId", sql.Int, account.customer_id)
-      .input("userId", sql.Int, userId).query(`
-        SELECT customer_id 
-        FROM Customers 
-        WHERE customer_id = @customerId 
-          AND approved_by_user = @userId
-      `);
-
-    if (permissionCheck.recordset.length === 0) {
-      return res.status(403).json({
-        message: "You do not have permission to delete this account",
-      });
-    }
-
-    // Delete the account
-    await pool
-      .request()
-      .input("accountId", sql.Int, accountId)
-      .query(`DELETE FROM Accounts WHERE account_id = @accountId`);
-
-    res.json({
-      message: "Rejected account deleted successfully",
-      deleted_account: accountId,
-    });
   } catch (err) {
-    console.error("Error deleting rejected account:", err);
-    res.status(500).json({ error: err.message });
+    console.error('[getAccountsByCustomer]', err);
+    return res.status(500).json({ error: err.message });
   }
 };
 
-/* ✅ VERY IMPORTANT */
+// ================================================================
+//  HELPER — used by userService.getUserAssociatedAccounts()
+//  GET /api/accounts/staff-accounts
+//  Returns all accounts for customers assigned to this staff member
+// ================================================================
+const getUserAssociatedAccounts = async (req, res) => {
+  const staffId = req.user.userId;
+
+  try {
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('staff_id', sql.Int, staffId)
+      .query(`
+        SELECT
+          a.account_id, a.account_number, a.account_type,
+          a.balance, a.status, a.opened_date,
+          c.customer_id, c.full_name AS customer_name,
+          c.email AS customer_email
+        FROM  Accounts  a
+        JOIN  Customers c ON c.customer_id = a.customer_id
+        WHERE c.assigned_staff_id = @staff_id
+        ORDER BY a.opened_date DESC
+      `);
+
+    return res.json(result.recordset);
+
+  } catch (err) {
+    console.error('[getUserAssociatedAccounts]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
+  createAccount,
   getPendingAccounts,
+  getAllAccounts,
   approveAccount,
   rejectAccount,
-  createAccount,
-  getUserAccounts,
+  getMyAccounts,
   getAccountsByCustomer,
-  deleteRejectedAccount,
+  getUserAssociatedAccounts,
 };

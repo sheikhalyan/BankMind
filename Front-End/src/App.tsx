@@ -25,11 +25,11 @@ function App() {
     if (!isAuthenticated || !user) return <Login />;
 
     switch (user.role) {
-      case 'admin':
+      case 'ADMIN':
         return <AdminDashboard />;
-      case 'user':
+      case 'STAFF':
         return <UserDashboard />;
-      case 'customer':
+      case 'CUSTOMER':
         return <CustomerDashboard />;
       default:
         return <Login />;
@@ -43,7 +43,7 @@ function App() {
     {
       path: '/admin',
       element: (
-        <ProtectedRoute allowedRoles={['admin']}>
+        <ProtectedRoute allowedRoles={['ADMIN']}>
           <AdminDashboard />
         </ProtectedRoute>
       ),
@@ -51,7 +51,7 @@ function App() {
     {
       path: '/user',
       element: (
-        <ProtectedRoute allowedRoles={['user']}>
+        <ProtectedRoute allowedRoles={['STAFF']}>
           <UserDashboard />
         </ProtectedRoute>
       ),
@@ -59,7 +59,7 @@ function App() {
     {
       path: '/customer',
       element: (
-        <ProtectedRoute allowedRoles={['customer']}>
+        <ProtectedRoute allowedRoles={['CUSTOMER']}>
           <CustomerDashboard />
         </ProtectedRoute>
       ),

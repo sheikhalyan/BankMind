@@ -1,12 +1,17 @@
+// ================================================================
+//  USER  (Staff + Admin — from Users table)
+// ================================================================
 export interface User {
   id: number;
   email: string;
-  role: "admin" | "user" | "customer";
+  role: 'STAFF' | 'ADMIN' | 'CUSTOMER';
   name: string;
-  phone?: string;
-  status?: "pending" | "approved" | "rejected";
+  status?: 'PENDING' | 'ACTIVE' | 'REJECTED' | 'SUSPENDED';
 }
 
+// ================================================================
+//  AUTH STATE
+// ================================================================
 export interface AuthState {
   user: User | null;
   token: string | null;
@@ -14,68 +19,143 @@ export interface AuthState {
   isLoading: boolean;
 }
 
+// ================================================================
+//  ACCOUNT  (from Accounts table)
+// ================================================================
 export interface Account {
-  id: number; // maps to account_id
-  customerId: number; // maps to customer_id
-  customerName?: string; // optional - might need JOIN with Customers table
-  accountNumber: number; // maps to account_id (same as id)
-  accountType: string; // maps to account_type
+  id: number;          // account_id
+  accountNumber: string;          // account_number e.g. "BM1234567890"
+  accountType: 'SAVINGS' | 'CURRENT';
   balance: number;
-  status: "pending" | "approved" | "rejected" | "user_approved" | "active"; // added more status options
-  createdAt: string; // maps to opened_date
-  is_user_approved?: number; // from your table
-  approved_by_user?: number; // from your table
-  rejected_by_user?: number; // from your table
+  status: 'PENDING' | 'ACTIVE' | 'REJECTED' | 'FROZEN' | 'CLOSED' | string;
+  openedDate?: string;          // opened_date
+  createdAt?: string;          // alias used in some components
+  customerId?: number;
+  customerName?: string;
 }
 
+// ================================================================
+//  TRANSACTION  (from Transactions table)
+// ================================================================
 export interface Transaction {
   id: number;
-  accountId: number;
-  type:
-    | "deposit"
-    | "withdrawal"
-    | "transfer"
-    | "CREDIT"
-    | "DEBIT"
-    | "credit"
-    | "debit";
+  fromAccountId?: number;
+  toAccountId?: number;
+  type: 'DEPOSIT' | 'WITHDRAWAL' | 'TRANSFER' | 'LOAN_DISBURSEMENT' | 'LOAN_REPAYMENT'
+  | 'CREDIT' | 'DEBIT' | 'credit' | 'debit';  // display aliases
   amount: number;
-  fromAccount?: string;
-  toAccount?: string;
-  description: string;
-  transaction_reason?: string;  // 👈 Add this field
+  status?: 'PENDING' | 'COMPLETED' | 'FAILED' | 'REVERSED';
+  description?: string;
+  transaction_reason?: string;
+  isFraud?: boolean;
   createdAt: string;
-  createdBy?: string;
-  running_balance?: number; 
+  displayType?: 'CREDIT' | 'DEBIT';
+  running_balance?: number;
 }
 
+// ================================================================
+//  LOAN  (from Loans + Loan_Policies join)
+// ================================================================
 export interface LoanRequest {
-  id: number;
-  amount: number;
-  status:
-    | "pending"
-    | "approved"
-    | "rejected"
-    | "PENDING"
-    | "APPROVED"
-    | "REJECTED";
-  createdAt: string;
-  loanType: string; // From Loan_Policies
-  interestRate: number; // From Loan_Policies
+  id: number;         // loan_id
+  customerId?: number;
+  customerName?: string;
+  accountId?: number;
+  policyId?: number;
+
+  // Amount — backend sends loan_amount; dashboard uses amount
+  loanAmount?: number;
+  amount?: number;         // display alias
+  approvedAmount?: number;
+
+  durationMonths?: number;
   startDate?: string;
   endDate?: string;
-  approvedBy?: number;
-  approvedAt?: string;
-  rejectionReason?: string;
-  // Optional policy details for display
+
+  // Status — includes both new schema values and legacy 'APPROVED'
+  status: 'PENDING' | 'ACTIVE' | 'REJECTED' | 'CLOSED' | 'DEFAULTED' | 'APPROVED' | string;
+
+  autoDeduct?: boolean;
+  createdAt: string;
+
+  // From Loan_Policies join
+  loanType: string;
+  interestRate?: number;
   minAmount?: number;
   maxAmount?: number;
   minMonths?: number;
   maxMonths?: number;
+
+  // Two-level approval info (new schema)
+  staffApprovalStatus?: string;
+  staffApprovalRemarks?: string;
+  adminApprovalStatus?: string;
+  adminApprovalRemarks?: string;
+
+  // Legacy display fields — kept for dashboard compatibility
+  approvedAt?: string;
+  approvedBy?: number;
+  rejectionReason?: string;
 }
 
+// ================================================================
+//  CUSTOMER  (from Customers table)
+// ================================================================
+export interface Customer {
+  customerId: number;
+  fullName: string;
+  email: string;
+  phone: string;
+  address?: string;
+  city?: string;
+  country: string;
+  status: 'PENDING' | 'ACTIVE' | 'REJECTED' | 'SUSPENDED';
+  assignedStaffId?: number;
+  assignedStaffName?: string;
+  createdAt: string;
+  staffApprovalStatus?: string;
+  staffApprovalRemarks?: string;
+  adminApprovalStatus?: string;
+  adminApprovalRemarks?: string;
+}
+
+// ================================================================
+//  NOTIFICATION  (from Notifications table)
+// ================================================================
+export interface Notification {
+  notificationId: number;
+  recipientId: number;
+  recipientType: 'CUSTOMER' | 'STAFF' | 'ADMIN';
+  type: string;
+  message: string;
+  relatedId?: number;
+  relatedType?: string;
+  isRead: boolean;
+  createdAt: string;
+}
+
+// ================================================================
+//  SUPPORT TICKET
+// ================================================================
+export interface SupportTicket {
+  ticketId: number;
+  customerId: number;
+  assignedTo?: number;
+  subject: string;
+  description: string;
+  category: 'ACCOUNT' | 'TRANSACTION' | 'LOAN' | 'GENERAL';
+  status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' | 'CLOSED';
+  priority: 'LOW' | 'MEDIUM' | 'HIGH';
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+// ================================================================
+//  GENERIC API RESPONSE
+// ================================================================
 export interface ApiResponse<T> {
   success: boolean;
   data?: T;
   message?: string;
+  error?: string;
 }

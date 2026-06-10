@@ -2,96 +2,88 @@ const API_BASE_URL = "http://127.0.0.1:5000/api";
 
 const getToken = () => localStorage.getItem("token");
 
+const clearSession = () => {
+  localStorage.removeItem("token");
+  localStorage.removeItem("user");
+  localStorage.removeItem("userRole");
+  window.dispatchEvent(new Event("auth:expired"));
+};
+
+const parseJson = async (response: Response) => {
+  const contentType = response.headers.get("content-type");
+  return contentType && contentType.includes("application/json") ? response.json() : null;
+};
+
+const handleResponse = async (response: Response) => {
+  const data = await parseJson(response);
+
+  if (!response.ok) {
+    const message = data?.message || "Request failed";
+    const lower = message.toLowerCase();
+
+    if (response.status === 401 || lower.includes("invalid token") || lower.includes("jwt expired")) {
+      clearSession();
+    }
+
+    throw new Error(message);
+  }
+
+  return data;
+};
+
+const authHeaders = () => ({
+  Authorization: `Bearer ${getToken()}`,
+  "Content-Type": "application/json",
+});
+
 export const api = {
-  // Base request methods
   async get(endpoint: string, params?: Record<string, any>) {
     let url = `${API_BASE_URL}${endpoint}`;
 
-    // Add query parameters if provided
     if (params) {
       const queryString = new URLSearchParams(params).toString();
       url += `?${queryString}`;
     }
 
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${getToken()}`,
-        "Content-Type": "application/json",
-      },
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || "Request failed");
-    return data;
+    const response = await fetch(url, { headers: authHeaders() });
+    return handleResponse(response);
   },
 
-  async post(endpoint: string, body: any) {
+  async post(endpoint: string, body?: any) {
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${getToken()}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
+      headers: authHeaders(),
+      body: body ? JSON.stringify(body) : undefined,
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || "Request failed");
-    return data;
+    return handleResponse(response);
   },
 
   async put(endpoint: string, body?: any) {
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
       method: "PUT",
-      headers: {
-        Authorization: `Bearer ${getToken()}`,
-        "Content-Type": "application/json",
-      },
+      headers: authHeaders(),
       body: body ? JSON.stringify(body) : undefined,
     });
-
-    // ✅ FIX: Don't try to parse JSON if response is empty
-    let data = null;
-    const contentType = response.headers.get("content-type");
-    if (contentType && contentType.includes("application/json")) {
-      data = await response.json();
-    }
-
-    if (!response.ok) {
-      throw new Error(data?.message || "Request failed");
-    }
-
-    // ✅ Return data (could be null for empty responses)
-    return data;
+    return handleResponse(response);
   },
 
-  // DELETE request  👈 ADD THIS
   async delete(endpoint: string) {
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
       method: "DELETE",
-      headers: {
-        Authorization: `Bearer ${getToken()}`,
-        "Content-Type": "application/json",
-      },
+      headers: authHeaders(),
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || "Request failed");
-    return data;
+    return handleResponse(response);
   },
-  // PATCH request - ✅ ADD THIS
+
   async patch(endpoint: string, body?: any) {
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
       method: "PATCH",
-      headers: {
-        Authorization: `Bearer ${getToken()}`,
-        "Content-Type": "application/json",
-      },
+      headers: authHeaders(),
       body: body ? JSON.stringify(body) : undefined,
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || "Request failed");
-    return data;
+    return handleResponse(response);
   },
 
-  // Accounts endpoints
   accounts: {
     getByCustomer: async (customerId: number) => {
       return api.get(`/accounts/customer/${customerId}`);
@@ -101,7 +93,6 @@ export const api = {
     },
   },
 
-  // Transactions endpoints
   transactions: {
     getByAccount: async (accountId: number) => {
       return api.get(`/transactions/account/${accountId}`);
@@ -123,7 +114,6 @@ export const api = {
     },
   },
 
-  // Loans endpoints
   loans: {
     getByCustomer: async (customerId: number) => {
       return api.get(`/loans/customer/${customerId}`);
@@ -143,10 +133,10 @@ export const api = {
       return api.get("/loan-approval/pending");
     },
     approveLoan: async (loanId: number) => {
-      return api.patch(`/loan-approval/approve/${loanId}`); // Now uses PATCH
+      return api.patch(`/loan-approval/approve/${loanId}`);
     },
     rejectLoan: async (loanId: number, reason: string) => {
-      return api.patch(`/loan-approval/reject/${loanId}`, { reason }); // Now uses PATCH
+      return api.patch(`/loan-approval/reject/${loanId}`, { reason });
     },
   },
 };

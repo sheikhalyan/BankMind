@@ -1,89 +1,58 @@
-import { api } from "./api";
+import { api } from './api';
 
 export const accountService = {
-  // Get accounts for a specific customer (for customer dashboard)
-  getByCustomer: async (customerId: number) => {
-    try {
-      const response = await api.get(`/accounts/customer/${customerId}`);
-      return response;
-    } catch (error) {
-      console.error("Error fetching customer accounts:", error);
-      throw error;
-    }
-  },
 
-  // Get all accounts
+  // ----------------------------------------------------------------
+  // STAFF / ADMIN
+  // ----------------------------------------------------------------
+
+  /** All accounts — Staff: assigned customers only | Admin: all */
   getAll: async () => {
-    try {
-      const response = await api.get("/accounts/all");
-      return response;
-    } catch (error) {
-      console.error("Error fetching accounts:", error);
-      throw error;
-    }
+    return api.get('/accounts');
   },
 
-  // Get all accounts for customers associated with this user
-  getUserAssociatedAccounts: async () => {
-    try {
-      const response = await api.get("/accounts/user-associated");
-      return response;
-    } catch (error) {
-      console.error("Error fetching user associated accounts:", error);
-      throw error;
-    }
-  },
-
-  // Get pending accounts
+  /** Accounts pending staff approval */
   getPending: async () => {
-    try {
-      const response = await api.get("/accounts/pending");
-      return response;
-    } catch (error) {
-      console.error("Error fetching pending accounts:", error);
-      throw error;
-    }
+    return api.get('/accounts/pending');
   },
 
-  // Create account (customer side)
-  create: async (accountData: { accountType: string }) => {
-    try {
-      // Convert to format expected by backend
-      const payload = {
-        account_type: accountData.accountType,
-      };
-      const response = await api.post("/accounts/create", payload);
-      return response;
-    } catch (error) {
-      console.error("Error creating account:", error);
-      throw error;
-    }
+  /** Accounts for a specific customer (staff/admin) */
+  getByCustomer: async (customerId: number) => {
+    return api.get(`/accounts/customer/${customerId}`);
   },
 
-  // Approve account (user side)
-  approve: async (accountId: number) => {
-    try {
-      const response = await api.put(`/accounts/approve/${accountId}`);
-      return response;
-    } catch (error) {
-      console.error("Error approving account:", error);
-      throw error;
-    }
+  /** Approve an account */
+  approve: async (accountId: number, remarks?: string) => {
+    return api.put(`/accounts/${accountId}/approve`, { remarks });
   },
 
-  // Reject account (user side)
-  reject: async (accountId: number) => {
-    try {
-      const response = await api.put(`/accounts/reject/${accountId}`);
-      return response;
-    } catch (error) {
-      console.error("Error rejecting account:", error);
-      throw error;
-    }
+  /** Reject an account */
+  reject: async (accountId: number, remarks?: string) => {
+    return api.put(`/accounts/${accountId}/reject`, { remarks });
   },
-  // Delete rejected account (user side)
-  deleteRejected: async (accountId: number) => {
-    const response = await api.delete(`/accounts/rejected/${accountId}`);
-    return response;
+
+  // ----------------------------------------------------------------
+  // CUSTOMER
+  // ----------------------------------------------------------------
+
+  /** Customer creates a new account request */
+  create: async (account_type: 'SAVINGS' | 'CURRENT') => {
+    return api.post('/accounts', { account_type });
   },
+
+  /** Customer views their own accounts */
+  /** Customer views their own accounts — maps snake_case → camelCase */
+  getMyAccounts: async () => {
+    const data = await api.get('/accounts/my');
+    const list = Array.isArray(data) ? data : (data as any)?.accounts ?? [];
+    return list.map((a: any) => ({
+      id: a.account_id,
+      accountNumber: a.account_number,
+      accountType: a.account_type,
+      balance: a.balance,
+      status: a.status,
+      openedDate: a.opened_date,
+    }));
+  },
+
 };

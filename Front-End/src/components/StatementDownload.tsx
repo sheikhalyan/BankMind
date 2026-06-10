@@ -22,7 +22,6 @@ interface StatementDownloadProps {
 }
 
 export default function StatementDownload({
-  accountId,
   accountNumber,
   customerName,
   transactions,

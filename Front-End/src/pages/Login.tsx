@@ -15,7 +15,8 @@ export default function Login() {
   const [loginType, setLoginType] = useState<'user' | 'customer'>('user');
   const [redirectTo, setRedirectTo] = useState<string | null>(null);
   const [entityId, setEntityId] = useState<number | null>(null);
-  const [entityType, setEntityType] = useState<string | null>(null);
+  const [entityType, setEntityType] = useState<'CUSTOMER' | 'STAFF' | 'ADMIN' | null>(null);
+  const [sessionExpired, setSessionExpired] = useState(false);
   const { login, isAuthenticated } = useAuth();
 
   useEffect(() => {
@@ -31,6 +32,16 @@ export default function Login() {
     }
   }, [isAuthenticated]);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('reason') === 'session_expired') {
+      setSessionExpired(true);
+      // Clean the URL so refresh doesn't show it again
+      window.history.replaceState({}, '', '/login');
+    }
+  }, []);
+
+
   // ✅ STEP 1: Send credentials, get OTP
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -39,15 +50,15 @@ export default function Login() {
 
     try {
       let response;
-      
+
       if (loginType === 'customer') {
         response = await authService.customerLogin({ email, password });
       } else {
         response = await authService.login({ email, password });
       }
-      
+
       console.log('📧 Login response:', response);
-      
+
       if (response.message && response.message.includes('OTP sent')) {
         setNeedsOtp(true);
         setEntityId(response.entity_id);
@@ -66,12 +77,12 @@ export default function Login() {
   };
 
   // ✅ Helper function to map entityType to valid role
-  const mapEntityTypeToRole = (type: string): 'admin' | 'user' | 'customer' => {
+  const mapEntityTypeToRole = (type: string): 'STAFF' | 'ADMIN' | 'CUSTOMER' => {
     const upperType = type.toUpperCase();
-    if (upperType === 'USER') return 'user';
-    if (upperType === 'CUSTOMER') return 'customer';
-    if (upperType === 'ADMIN') return 'admin';
-    return 'user'; // default fallback
+    if (upperType === 'STAFF' || upperType === 'USER') return 'STAFF';
+    if (upperType === 'CUSTOMER') return 'CUSTOMER';
+    if (upperType === 'ADMIN') return 'ADMIN';
+    return 'STAFF'; // default fallback
   };
 
   // ✅ STEP 2: Verify OTP, get token and create user object
@@ -92,86 +103,84 @@ export default function Login() {
         entity_type: entityType,
         otp_code: otp
       });
-      
-      const response = await authService.verifyOTP({ 
+
+      const response = await authService.verifyOTP({
         entity_id: entityId,
         entity_type: entityType,
         otp_code: otp
       });
-      
+
       console.log('✅ OTP verification response:', response);
-      
+
       if (response.token) {
         setOtp('');
         setNeedsOtp(false);
-        
+
         try {
           const tokenParts = response.token.split('.');
           const decodedPayload = JSON.parse(atob(tokenParts[1]));
-          
+
           console.log('🔑 Decoded token:', decodedPayload);
-          
+
           // ✅ FIXED: Properly map the role from decoded payload or entityType
-          let userRole: 'admin' | 'user' | 'customer';
-          
+          let userRole: 'STAFF' | 'ADMIN' | 'CUSTOMER';
+
           if (decodedPayload.role) {
-            const roleLower = decodedPayload.role.toLowerCase();
-            if (roleLower === 'admin') userRole = 'admin';
-            else if (roleLower === 'user') userRole = 'user';
-            else if (roleLower === 'customer') userRole = 'customer';
+            const roleUpper = decodedPayload.role.toUpperCase();
+            if (roleUpper === 'ADMIN') userRole = 'ADMIN';
+            else if (roleUpper === 'STAFF' || roleUpper === 'USER') userRole = 'STAFF';
+            else if (roleUpper === 'CUSTOMER') userRole = 'CUSTOMER';
             else userRole = mapEntityTypeToRole(entityType);
           } else {
             userRole = mapEntityTypeToRole(entityType);
           }
-          
+
           const user: User = {
             id: decodedPayload.userId || decodedPayload.customerId || entityId,
             email: email,
             role: userRole,
             name: decodedPayload.name || email.split('@')[0],
-            phone: '',
-            status: 'approved'
+            status: 'ACTIVE'
           };
-          
+
           console.log('👤 Created user object:', user);
-          
+
           login(response.token, user);
-          
-          const role = user.role.toLowerCase();
+
+          const role = user.role;
           console.log('🎯 User role:', role);
-          
-          if (role === 'admin') {
+
+          if (role === 'ADMIN') {
             setRedirectTo('/admin');
-          } else if (role === 'user') {
+          } else if (role === 'STAFF') {
             setRedirectTo('/user');
-          } else if (role === 'customer') {
+          } else if (role === 'CUSTOMER') {
             setRedirectTo('/customer');
           } else {
             setRedirectTo('/');
           }
-          
+
         } catch (decodeError) {
           console.error('❌ Token decode error:', decodeError);
-          
+
           // ✅ FIXED: Properly map entityType to valid role
           const userRole = mapEntityTypeToRole(entityType);
-          
+
           const user: User = {
             id: entityId,
             email: email,
             role: userRole,
             name: email.split('@')[0],
-            phone: '',
-            status: 'approved'
+            status: 'ACTIVE'
           };
-          
+
           login(response.token, user);
-          
-          if (userRole === 'user') {
+
+          if (userRole === 'STAFF') {
             setRedirectTo('/user');
-          } else if (userRole === 'customer') {
+          } else if (userRole === 'CUSTOMER') {
             setRedirectTo('/customer');
-          } else if (userRole === 'admin') {
+          } else if (userRole === 'ADMIN') {
             setRedirectTo('/admin');
           } else {
             setRedirectTo('/');
@@ -200,7 +209,7 @@ export default function Login() {
       } else {
         response = await authService.login({ email, password });
       }
-      
+
       if (response.message && response.message.includes('OTP sent')) {
         setEntityId(response.entity_id);
         setEntityType(response.entity_type);
@@ -213,6 +222,18 @@ export default function Login() {
     }
   };
 
+  {
+    sessionExpired && (
+      <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-2 text-amber-800 text-sm">
+        <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+          <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+        </svg>
+        Your session has expired. Please log in again.
+      </div>
+    )
+  }
+
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-slate-100 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl shadow-xl p-8 w-full max-w-md">
@@ -221,7 +242,7 @@ export default function Login() {
             <LogIn className="w-8 h-8 text-white" />
           </div>
         </div>
-        
+
         {!needsOtp ? (
           <>
             <h2 className="text-3xl font-bold text-center mb-2 text-gray-800">Welcome Back</h2>
@@ -230,18 +251,16 @@ export default function Login() {
             <div className="flex mb-6 bg-gray-100 p-1 rounded-lg">
               <button
                 type="button"
-                className={`flex-1 py-2 rounded-md transition ${
-                  loginType === 'user' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-600'
-                }`}
+                className={`flex-1 py-2 rounded-md transition ${loginType === 'user' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-600'
+                  }`}
                 onClick={() => setLoginType('user')}
               >
                 User/Admin
               </button>
               <button
                 type="button"
-                className={`flex-1 py-2 rounded-md transition ${
-                  loginType === 'customer' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-600'
-                }`}
+                className={`flex-1 py-2 rounded-md transition ${loginType === 'customer' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-600'
+                  }`}
                 onClick={() => setLoginType('customer')}
               >
                 Customer
@@ -300,7 +319,10 @@ export default function Login() {
               {loading ? 'Sending OTP...' : 'Sign In'}
             </button>
           </form>
+
+
         ) : (
+
           <form onSubmit={handleVerifyOtp} className="space-y-6">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">OTP Code</label>
@@ -340,7 +362,7 @@ export default function Login() {
                 onClick={() => {
                   setNeedsOtp(false);
                   setOtp('');
-                  setEntityId(null);    
+                  setEntityId(null);
                   setEntityType(null);
                 }}
                 className="text-gray-500 hover:text-gray-700 font-medium text-sm"

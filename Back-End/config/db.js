@@ -8,24 +8,25 @@ const config = {
     database: process.env.DB_DATABASE,
     port: parseInt(process.env.DB_PORT),
     options: {
-        encrypt: false,  // Use true if using Azure
-        trustServerCertificate: true
+        encrypt: false,  // true for Azure
+        trustServerCertificate: true,
     },
     pool: {
         max: 10,
         min: 0,
-        idleTimeoutMillis: 30000
+        idleTimeoutMillis: 30000,
+    },
+};
+
+// Single shared pool — created once, reused everywhere
+let pool = null;
+
+const getPool = async () => {
+    if (!pool) {
+        pool = await new sql.ConnectionPool(config).connect();
+        console.log('✅ Connected to MSSQL');
     }
+    return pool;
 };
 
-const poolPromise = new sql.ConnectionPool(config)
-    .connect()
-    .then(pool => {
-        console.log('Connected to MSSQL');
-        return pool;
-    })
-    .catch(err => console.log('Database Connection Failed! ', err));
-
-module.exports = {
-    sql, poolPromise
-};
+module.exports = { getPool, sql };

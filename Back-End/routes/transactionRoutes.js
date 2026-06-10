@@ -1,21 +1,21 @@
 const express = require('express');
 const router = express.Router();
 
-const { depositMoney,withdrawMoney, transferMoney, getAccountTransactions } = require('../controllers/transactionController');
-const { verifyToken, isUser, isCustomer } = require('../middlewares/authMiddleware');
+const { depositMoney, withdrawMoney, transferMoney, getAccountTransactions } = require('../controllers/transactionController');
+const { verifyToken, isStaff, isCustomer } = require('../middlewares/authMiddleware');
 
 
 /* USER → DEPOSIT */
-router.post('/deposit', verifyToken, isUser, depositMoney);
+router.post('/deposit', verifyToken, isStaff, depositMoney);
 
 /* CUSTOMER → WITHDRAW*/
 router.post('/withdraw', verifyToken, isCustomer, withdrawMoney);
 
 /*CUSTOMER -> TRANSFER*/
 
-router.post('/transfer',verifyToken,isCustomer,transferMoney);
+router.post('/transfer', verifyToken, isCustomer, transferMoney);
 
 /*CUSTOMER -> Account Transactions*/
-router.get( '/account/:account_id',verifyToken,isCustomer,getAccountTransactions);
+router.get('/account/:accountId', verifyToken, isCustomer, getAccountTransactions);
 
 module.exports = router;

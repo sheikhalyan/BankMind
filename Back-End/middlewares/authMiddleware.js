@@ -10,7 +10,7 @@ const verifyToken = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded; // { userId, role }
+    req.user = decoded;
     next();
   } catch (err) {
     return res.status(403).json({ message: 'Invalid token' });
@@ -18,31 +18,32 @@ const verifyToken = (req, res, next) => {
 };
 
 const isAdmin = (req, res, next) => {
-  const role = req.user.role.toLowerCase();
-
-  if (role !== 'admin') {
+  if (req.user.role.toUpperCase() !== 'ADMIN') {
     return res.status(403).json({ message: 'Access denied. Admins only.' });
   }
   next();
 };
 
-const isUser = (req, res, next) => {
-  const role = req.user.role.toLowerCase();
+const isStaff = (req, res, next) => {
+  if (req.user.role.toUpperCase() !== 'STAFF') {
+    return res.status(403).json({ message: 'Access denied. Staff only.' });
+  }
+  next();
+};
 
-  if (role !== 'user') {
-    return res.status(403).json({ message: 'Users only' });
+const isStaffOrAdmin = (req, res, next) => {
+  const role = req.user.role.toUpperCase();
+  if (role !== 'STAFF' && role !== 'ADMIN') {
+    return res.status(403).json({ message: 'Access denied.' });
   }
   next();
 };
 
 const isCustomer = (req, res, next) => {
-  const role = req.user.role.toLowerCase();
-
-  if (role !== 'customer') {
-    return res.status(403).json({ message: 'Customers only' });
+  if (req.user.role.toUpperCase() !== 'CUSTOMER') {
+    return res.status(403).json({ message: 'Customers only.' });
   }
   next();
 };
 
-module.exports = { verifyToken, isAdmin, isUser, isCustomer };
-
+module.exports = { verifyToken, isAdmin, isStaff, isStaffOrAdmin, isCustomer };
