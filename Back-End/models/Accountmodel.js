@@ -93,6 +93,36 @@ const AccountModel = {
         return result.recordset[0].cnt > 0;
     },
 
+
+    // Check if customer has any ACTIVE loans on a specific account
+    async hasActiveLoans(account_id) {
+        const pool = await getPool();
+        const result = await pool.request()
+            .input('account_id', sql.Int, account_id)
+            .query(`
+            SELECT COUNT(1) AS cnt FROM Loans
+            WHERE account_id = @account_id AND status = 'ACTIVE'
+        `);
+        return result.recordset[0].cnt > 0;
+    },
+
+    // Get second ACTIVE account of same customer (excluding current account)
+    async getSecondAccount(customer_id, exclude_account_id) {
+        const pool = await getPool();
+        const result = await pool.request()
+            .input('customer_id', sql.Int, customer_id)
+            .input('exclude_account_id', sql.Int, exclude_account_id)
+            .query(`
+            SELECT TOP 1 account_id, account_number, account_type, balance
+            FROM Accounts
+            WHERE customer_id = @customer_id
+              AND account_id != @exclude_account_id
+              AND status = 'ACTIVE'
+        `);
+        return result.recordset[0] || null;
+    },
+
+
 };
 
 module.exports = AccountModel;

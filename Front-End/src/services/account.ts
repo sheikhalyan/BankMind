@@ -31,6 +31,26 @@ export const accountService = {
     return api.put(`/accounts/${accountId}/reject`, { remarks });
   },
 
+  /** Get all accounts with full details — Admin only */
+  getAllWithDetails: async () => {
+    return api.get('/accounts');
+  },
+
+  /** Approve account closure — Staff/Admin */
+  approveClosure: async (accountId: number) => {
+    return api.put(`/accounts/${accountId}/approve-closure`);
+  },
+
+  /** Freeze an account — Admin only */
+  freeze: async (accountId: number, reason: string) => {
+    return api.put(`/accounts/${accountId}/freeze`, { reason });
+  },
+
+  /** Unfreeze an account — Admin only */
+  unfreeze: async (accountId: number) => {
+    return api.put(`/accounts/${accountId}/unfreeze`);
+  },
+
   // ----------------------------------------------------------------
   // CUSTOMER
   // ----------------------------------------------------------------
@@ -39,6 +59,9 @@ export const accountService = {
   create: async (account_type: 'SAVINGS' | 'CURRENT') => {
     return api.post('/accounts', { account_type });
   },
+
+  requestClosure: (accountId: number) =>
+    api.post(`/accounts/${accountId}/request-closure`),
 
   /** Customer views their own accounts */
   /** Customer views their own accounts — maps snake_case → camelCase */

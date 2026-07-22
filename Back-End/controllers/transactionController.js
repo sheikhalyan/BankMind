@@ -133,19 +133,24 @@ const withdrawMoney = async (req, res) => {
       .input("account_id", sql.Int, account_id)
       .input("customer_id", sql.Int, customerId)
       .query(`
-        SELECT a.balance, a.account_number,
+        SELECT a.balance, a.account_number, a.status,
                c.full_name AS customer_name, c.assigned_staff_id
         FROM   Accounts  a
         JOIN   Customers c ON c.customer_id = a.customer_id
         WHERE  a.account_id  = @account_id
           AND  a.customer_id = @customer_id
-          AND  a.status      = 'ACTIVE'
       `);
 
     if (!accountResult.recordset[0])
-      return res.status(403).json({ message: "Account not found or not active." });
+      return res.status(403).json({ message: "Account not found." });
 
-    const { balance, account_number, customer_name, assigned_staff_id } = accountResult.recordset[0];
+    const { balance, account_number, status, customer_name, assigned_staff_id } = accountResult.recordset[0];
+
+    if (status === 'FROZEN')
+      return res.status(403).json({ message: "Your account is frozen. Please contact support." });
+
+    if (status !== 'ACTIVE')
+      return res.status(403).json({ message: "Account is not active." });
 
     if (balance < amount)
       return res.status(400).json({ message: "Insufficient balance." });
@@ -258,6 +263,11 @@ const transferMoney = async (req, res) => {
 
     const sender = senderResult.recordset[0];
 
+    if (sender.status === 'FROZEN')
+      return res.status(403).json({ message: "Your account is frozen. Please contact support." });
+    if (sender.status !== 'ACTIVE')
+      return res.status(403).json({ message: "Sender account is not active." });
+
     if (sender.balance < amount)
       return res.status(400).json({ message: "Insufficient balance." });
 
@@ -277,8 +287,10 @@ const transferMoney = async (req, res) => {
 
     const receiver = receiverResult.recordset[0];
 
-    if (receiver.status !== "ACTIVE")
-      return res.status(400).json({ message: "Receiver account is not active." });
+    if (receiver.status === 'FROZEN')
+      return res.status(403).json({ message: "Recipient account is frozen and cannot receive funds." });
+    if (receiver.status !== 'ACTIVE')
+      return res.status(403).json({ message: "Recipient account is not active." });
 
     if (receiver.account_id === from_account_id)
       return res.status(400).json({ message: "Cannot transfer to the same account." });

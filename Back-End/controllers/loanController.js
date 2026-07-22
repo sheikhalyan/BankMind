@@ -83,13 +83,22 @@ const applyLoan = async (req, res) => {
       .input('account_id', sql.Int, account_id)
       .input('customer_id', sql.Int, customerId)
       .query(`
-        SELECT account_id, status FROM Accounts
+        SELECT account_id, status, balance FROM Accounts
         WHERE  account_id = @account_id AND customer_id = @customer_id
       `);
+
     if (!accResult.recordset[0])
       return res.status(404).json({ message: 'Account not found.' });
     if (accResult.recordset[0].status !== 'ACTIVE')
       return res.status(400).json({ message: 'Account must be ACTIVE to apply for a loan.' });
+
+    // ── Minimum balance check — 10% of requested loan amount ──
+    const accountBalance = parseFloat(accResult.recordset[0].balance);
+    const minimumRequired = parseFloat((loan_amount * 0.10).toFixed(2));
+    if (accountBalance < minimumRequired)
+      return res.status(400).json({
+        message: `Insufficient balance. You need at least PKR ${minimumRequired.toLocaleString('en-PK')} (10% of loan amount) in your account to apply. Your current balance is PKR ${accountBalance.toLocaleString('en-PK')}.`,
+      });
 
     // Verify policy exists and is active
     const policyResult = await pool.request()
@@ -102,7 +111,7 @@ const applyLoan = async (req, res) => {
     // Validate amount and duration
     if (loan_amount < policy.min_amount || loan_amount > policy.max_amount)
       return res.status(400).json({
-        message: `Loan amount must be between ${policy.min_amount} and ${policy.max_amount}.`,
+        message: `Loan amount must be between PKR ${policy.min_amount.toLocaleString('en-PK')} and PKR ${policy.max_amount.toLocaleString('en-PK')}.`,
       });
     if (duration_months < policy.min_months || duration_months > policy.max_months)
       return res.status(400).json({
@@ -125,30 +134,27 @@ const applyLoan = async (req, res) => {
     const loanId = insertResult.recordset[0].loan_id;
     const customer = await CustomerModel.findById(customerId);
 
-    // Notify customer
     await notifyCustomer({
       customer_id: customerId,
       type: 'LOAN_SUBMITTED',
-      message: `Your ${policy.loan_type} loan application of PKR ${loan_amount} has been submitted and is awaiting approval.`,
+      message: `Your ${policy.loan_type} loan application of PKR ${loan_amount.toLocaleString('en-PK')} has been submitted and is awaiting approval.`,
       related_id: loanId,
       related_type: 'LOAN',
     });
 
-    // Notify assigned staff
     if (customer?.assigned_staff_id) {
       await notifyStaff({
         user_id: customer.assigned_staff_id,
         type: 'LOAN_APPLIED',
-        message: `Customer "${customer.full_name}" applied for a ${policy.loan_type} loan of PKR ${loan_amount}. Awaiting your approval.`,
+        message: `Customer "${customer.full_name}" applied for a ${policy.loan_type} loan of PKR ${loan_amount.toLocaleString('en-PK')}. Awaiting your approval.`,
         related_id: loanId,
         related_type: 'LOAN',
       });
     }
 
-    // Notify all admins
     await notifyAdmins({
       type: 'LOAN_APPLIED',
-      message: `Customer "${customer?.full_name}" applied for a ${policy.loan_type} loan of PKR ${loan_amount}.`,
+      message: `Customer "${customer?.full_name}" applied for a ${policy.loan_type} loan of PKR ${loan_amount.toLocaleString('en-PK')}.`,
       related_id: loanId,
       related_type: 'LOAN',
     });
@@ -157,6 +163,7 @@ const applyLoan = async (req, res) => {
       message: 'Loan application submitted. Awaiting staff approval.',
       loan_id: loanId,
       interest_rate: policy.interest_rate,
+      minimum_balance_required: minimumRequired,
     });
 
   } catch (err) {
@@ -469,6 +476,20 @@ const adminApproveLoan = async (req, res) => {
     endDate.setMonth(endDate.getMonth() + months);
 
     // ── APPROVE LOAN ─────────────────────────────────────────────
+    // ── STEP 1: Check account is not FROZEN before disbursing ────────
+    const accountCheck = await pool.request()
+      .input('account_id', sql.Int, loan.account_id)
+      .query(`SELECT account_id, status FROM Accounts WHERE account_id = @account_id`);
+
+    const loanAccount = accountCheck.recordset[0];
+    if (!loanAccount)
+      return res.status(404).json({ message: 'Loan account not found.' });
+    if (loanAccount.status === 'FROZEN')
+      return res.status(400).json({ message: 'Cannot disburse loan — account is frozen.' });
+    if (loanAccount.status !== 'ACTIVE')
+      return res.status(400).json({ message: `Cannot disburse loan — account status is ${loanAccount.status}.` });
+
+    // ── STEP 2: Record approval + activate loan ──────────────────────
     await pool.request()
       .input('loan_id', sql.Int, loanId)
       .input('approver_id', sql.Int, adminId)
@@ -477,16 +498,65 @@ const adminApproveLoan = async (req, res) => {
       .input('end_date', sql.Date, endDate)
       .input('approved_amount', sql.Decimal(15, 2), principal)
       .query(`
-        INSERT INTO Loan_Approvals (loan_id, approver_id, approver_role, status, remarks)
-        VALUES (@loan_id, @approver_id, 'ADMIN', 'APPROVED', @remarks);
- 
-        UPDATE Loans
-        SET    status          = 'ACTIVE',
-               start_date      = @start_date,
-               end_date        = @end_date,
-               approved_amount = @approved_amount
-        WHERE  loan_id = @loan_id;
-      `);
+    INSERT INTO Loan_Approvals (loan_id, approver_id, approver_role, status, remarks)
+    VALUES (@loan_id, @approver_id, 'ADMIN', 'APPROVED', @remarks);
+
+    UPDATE Loans
+    SET    status          = 'ACTIVE',
+           start_date      = @start_date,
+           end_date        = @end_date,
+           approved_amount = @approved_amount
+    WHERE  loan_id = @loan_id;
+  `);
+
+    // ── STEP 3: DISBURSE — credit loan amount to customer account ───
+    const disbursementDate = new Date();
+    const dbTx = pool.transaction();
+    await dbTx.begin();
+    let disbursementTransactionId;
+
+    try {
+      // Credit approved amount to customer's account
+      await dbTx.request()
+        .input('amount', sql.Decimal(15, 2), principal)
+        .input('account_id', sql.Int, loan.account_id)
+        .query(`UPDATE Accounts SET balance = balance + @amount WHERE account_id = @account_id`);
+
+      // Record as DEPOSIT transaction
+      const txResult = await dbTx.request()
+        .input('account_id', sql.Int, loan.account_id)
+        .input('amount', sql.Decimal(15, 2), principal)
+        .input('description', sql.NVarChar,
+          `Loan disbursement — ${loan.loan_type} loan #${loanId} approved and credited`)
+        .query(`
+      INSERT INTO Transactions (to_account_id, transaction_type, amount, description)
+      OUTPUT INSERTED.transaction_id
+      VALUES (@account_id, 'DEPOSIT', @amount, @description)
+    `);
+
+      disbursementTransactionId = txResult.recordset[0].transaction_id;
+
+      // Update loan disbursement fields
+      await dbTx.request()
+        .input('loan_id', sql.Int, loanId)
+        .input('disbursed_amount', sql.Decimal(15, 2), principal)
+        .input('disbursed_at', sql.DateTime, disbursementDate)
+        .input('disbursed_by', sql.Int, adminId)
+        .query(`
+      UPDATE Loans
+      SET    disbursed_amount = @disbursed_amount,
+             disbursed_at     = @disbursed_at,
+             disbursed_by     = @disbursed_by
+      WHERE  loan_id = @loan_id
+    `);
+
+      await dbTx.commit();
+
+    } catch (txErr) {
+      try { await dbTx.rollback(); } catch (_) { }
+      console.error('[adminApproveLoan] Disbursement failed:', txErr);
+      return res.status(500).json({ error: `Loan approved but disbursement failed: ${txErr.message}` });
+    }
 
     // ── GENERATE REPAYMENT SCHEDULE ──────────────────────────────
     // Due date = same day as start date every month
@@ -520,7 +590,7 @@ const adminApproveLoan = async (req, res) => {
       notifyCustomer({
         customer_id: loan.customer_id,
         type: 'LOAN_APPROVED',
-        message: `Your ${loan.loan_type} loan of PKR ${principal.toLocaleString()} is approved and active! Monthly EMI: PKR ${monthlyEMI.toLocaleString()}. Total repayment: PKR ${totalAmount.toLocaleString()} (includes PKR ${totalInterest.toLocaleString()} interest at ${annualRate}% per annum).`,
+        message: `Your ${loan.loan_type} loan of PKR ${principal.toLocaleString()} has been approved and PKR ${principal.toLocaleString()} has been credited to your account. Monthly EMI: PKR ${monthlyEMI.toLocaleString()} for ${months} months. Total repayment: PKR ${totalAmount.toLocaleString()} (includes PKR ${totalInterest.toLocaleString()} interest at ${annualRate}% per annum).`,
         related_id: Number(loanId),
         related_type: 'LOAN',
       }),
@@ -539,9 +609,12 @@ const adminApproveLoan = async (req, res) => {
     await Promise.all(notifications);
 
     return res.json({
-      message: 'Loan fully approved and active.',
+      message: 'Loan fully approved, disbursed, and active.',
       loan_id: Number(loanId),
       principal,
+      disbursed_amount: principal,
+      disbursed_at: disbursementDate,
+      disbursement_transaction_id: disbursementTransactionId,
       annual_rate: annualRate,
       total_interest: totalInterest,
       total_repayment: totalAmount,

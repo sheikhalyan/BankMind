@@ -512,9 +512,44 @@ async function processDeductions(pool, loan, repayments) {
         // Re-fetch balance before each attempt
         const balResult = await pool.request()
             .input('account_id', sql.Int, loan.account_id)
-            .query(`SELECT balance FROM Accounts WHERE account_id = @account_id`);
-        const currentBalance = parseFloat(balResult.recordset[0]?.balance || 0);
+            .query(`SELECT balance, status FROM Accounts WHERE account_id = @account_id`);
+
+        const accountRow = balResult.recordset[0];
+        const currentBalance = parseFloat(accountRow?.balance || 0);
         const amount = parseFloat(repayment.amount);
+
+        // Skip deduction if account is FROZEN
+        if (accountRow?.status === 'FROZEN') {
+            await Promise.all([
+                notifyCustomer({
+                    customer_id: loan.customer_id,
+                    type: 'AUTO_DEDUCTION_FAILED',
+                    message: `Auto-deduction skipped for installment #${repayment.installment_no} — your account is frozen. Please contact support.`,
+                    related_id: Number(loan.loan_id),
+                    related_type: 'LOAN',
+                }),
+                loan.staff_id && notifyStaff({
+                    user_id: loan.staff_id,
+                    type: 'AUTO_DEDUCTION_FAILED',
+                    message: `Auto-deduction skipped for customer "${loan.customer_name}" installment #${repayment.installment_no} — account is FROZEN.`,
+                    related_id: Number(loan.loan_id),
+                    related_type: 'LOAN',
+                }),
+                notifyAdmins({
+                    type: 'AUTO_DEDUCTION_FAILED',
+                    message: `Auto-deduction skipped for customer "${loan.customer_name}" loan #${loan.loan_id} installment #${repayment.installment_no} — account is FROZEN.`,
+                    related_id: Number(loan.loan_id),
+                    related_type: 'LOAN',
+                }),
+            ].filter(Boolean));
+
+            results.push({
+                repayment_id: repayment.repayment_id,
+                status: 'SKIPPED',
+                reason: 'Account is FROZEN'
+            });
+            continue;
+        }
 
         if (currentBalance < amount) {
             // Log failure
@@ -668,4 +703,5 @@ module.exports = {
     runAutoDeduction,
     runAutoDeductionAll,
     markOverdueInstallments,
+    processDeductions
 };

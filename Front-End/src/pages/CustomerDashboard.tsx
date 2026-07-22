@@ -1,16 +1,16 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useAuth } from "../context/AuthContext";
 import { accountService } from "../services/account";
 import { transactionService } from "../services/transaction";
 import { loanService } from "../services/loan";
 import NotificationBell from "../components/NotificationBell";
 import { Account, Transaction, LoanRequest } from "../types";
+import { usePolling } from "../hooks/usePolling";
 import {
   LogOut, Building2, Plus, ArrowUpRight, ArrowDownLeft,
   Send, FileText, CreditCard, Wallet, TrendingUp, Clock,
   CheckCircle, XCircle, AlertCircle, Home, Car, GraduationCap,
-  Heart, Briefcase, Stethoscope, RefreshCw, User, Calendar,
-  ChevronDown, ChevronUp,
+  Heart, Briefcase, Stethoscope, RefreshCw, User, Calendar, ChevronUp
 } from "lucide-react";
 import ProfileModal from "../components/ProfileModal";
 import StatementDownload from "../components/StatementDownload";
@@ -41,6 +41,31 @@ interface Repayment {
   is_overdue?: boolean;
 }
 
+// ── HELPER COMPONENTS (defined BEFORE main component to avoid scoping issues) ──
+const InfoRow = ({ label, value }: { label: string; value: string }) => (
+  <div>
+    <p className="text-xs text-gray-400">{label}</p>
+    <p className="text-sm font-medium text-gray-900">{value}</p>
+  </div>
+);
+
+const Btn = ({ label, color, onClick }: { label: string; color: string; onClick: () => void }) => {
+  const colors: Record<string, string> = {
+    green: "bg-green-50 text-green-700 hover:bg-green-100",
+    red: "bg-red-50 text-red-700 hover:bg-red-100",
+    gray: "bg-gray-100 text-gray-700 hover:bg-gray-200",
+    blue: "bg-blue-50 text-blue-700 hover:bg-blue-100",
+  };
+  return (
+    <button onClick={onClick}
+      className={`px-3 py-1 rounded-lg text-xs font-medium transition ${colors[color] || colors.gray}`}>
+      {label}
+    </button>
+  );
+};
+
+
+// ── MAIN COMPONENT ────────────────────────────────────────────────
 export default function CustomerDashboard() {
   const { user, logout } = useAuth();
   const { toasts, removeToast, toast } = useToast();
@@ -59,6 +84,9 @@ export default function CustomerDashboard() {
   const [showTransfer, setShowTransfer] = useState(false);
   const [showLoanForm, setShowLoanForm] = useState(false);
 
+  const [showClosureConfirm, setShowClosureConfirm] = useState<Account | null>(null);
+  const [closureLoading, setClosureLoading] = useState(false);
+
   const [filteredTransactions, setFilteredTransactions] = useState<Transaction[]>([]);
   const [dateRange, setDateRange] = useState<{ start: Date; end: Date } | null>(null);
   const [activeFilter, setActiveFilter] = useState<string | null>("all");
@@ -73,10 +101,7 @@ export default function CustomerDashboard() {
   const [repaymentSchedules, setRepaymentSchedules] = useState<Record<number, Repayment[]>>({});
   const [loadingScheduleId, setLoadingScheduleId] = useState<number | null>(null);
 
-  // balloon payment selection state
   const [selectedRepaymentIds, setSelectedRepaymentIds] = useState<Record<number, Set<number>>>({});
-
-  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── HELPERS ──────────────────────────────────────────────────────
   const getLoanIcon = (loanType: string) => {
@@ -96,6 +121,7 @@ export default function CustomerDashboard() {
     a.status?.toLowerCase() === "active" || a.status?.toLowerCase() === "approved"
   );
   const totalBalance = activeAccounts.reduce((sum, a) => sum + (a.balance || 0), 0);
+  const frozenAccounts = accounts.filter(a => a.status?.toLowerCase() === "frozen");
   const hasSavings = visibleAccounts.some(a => a.accountType?.toUpperCase() === "SAVINGS");
   const hasCurrent = visibleAccounts.some(a => a.accountType?.toUpperCase() === "CURRENT");
 
@@ -105,14 +131,15 @@ export default function CustomerDashboard() {
       case "approved": return { bg: "bg-green-100", text: "text-green-700", icon: <CheckCircle className="w-4 h-4" /> };
       case "pending": return { bg: "bg-yellow-100", text: "text-yellow-700", icon: <Clock className="w-4 h-4" /> };
       case "rejected": return { bg: "bg-red-100", text: "text-red-700", icon: <XCircle className="w-4 h-4" /> };
+      case "frozen": return { bg: "bg-blue-100", text: "text-blue-800", icon: <AlertCircle className="w-4 h-4" /> };
       case "closed": return { bg: "bg-gray-100", text: "text-gray-700", icon: <CheckCircle className="w-4 h-4" /> };
       case "defaulted": return { bg: "bg-red-200", text: "text-red-800", icon: <XCircle className="w-4 h-4" /> };
+      case "closure_pending": return { bg: "bg-orange-100", text: "text-orange-700", icon: <Clock className="w-4 h-4" /> };
       default: return { bg: "bg-gray-100", text: "text-gray-700", icon: <AlertCircle className="w-4 h-4" /> };
     }
   };
 
   // ── INTEREST PREVIEW CALCULATOR (Simple Interest) ─────────────────
-  // Used ONLY for the loan application form preview (hardcoded policy rates)
   const calcLoanPreview = (amount: number, loanType: string, months: number) => {
     const policy = LOAN_POLICY_DETAILS[loanType];
     if (!policy || !amount || !months || months <= 0) return null;
@@ -124,14 +151,7 @@ export default function CustomerDashboard() {
     return { principal: amount, rate: policy.rate, totalInterest, totalAmount, regularEMI, lastEMI, months };
   };
 
-  // ── INTEREST SUMMARY using actual backend rate ────────────────────
-  // FIX BUG 1: Use loan.interestRate from backend instead of hardcoded LOAN_POLICY_DETAILS
-  // This ensures the breakdown shown matches the actual repayment schedule amounts
-  const calcInterestSummaryFromRate = (
-    principal: number,
-    annualRate: number,
-    months: number
-  ) => {
+  const calcInterestSummaryFromRate = (principal: number, annualRate: number, months: number) => {
     if (!principal || !annualRate || !months || months <= 0) return null;
     const years = months / 12;
     const totalInterest = parseFloat(((principal * annualRate * years) / 100).toFixed(2));
@@ -142,23 +162,37 @@ export default function CustomerDashboard() {
   };
 
   // ── DATA FETCHING ─────────────────────────────────────────────────
-  const silentRefreshAccounts = async () => {
+  const silentRefreshAll = async () => {
     try {
-      const response = await accountService.getMyAccounts();
-      const list: Account[] = Array.isArray(response) ? response : (response as any).accounts || [];
-      // Only update state if data actually changed — prevents unnecessary re-renders / flicker
-      setAccounts(prev => {
-        if (JSON.stringify(prev) === JSON.stringify(list)) return prev;
-        return list;
-      });
+      const accRes = await accountService.getMyAccounts();
+      const accList = Array.isArray(accRes) ? accRes : (accRes as any).accounts || [];
+      setAccounts(prev => JSON.stringify(prev) === JSON.stringify(accList) ? prev : accList);
       setSelectedAccount(prev => {
         if (!prev) return prev;
-        const updated = list.find((a: Account) => a.id === prev.id);
+        const updated = accList.find((a: any) => a.id === prev.id);
         if (!updated) return prev;
-        // Only swap if something changed
-        if (JSON.stringify(updated) === JSON.stringify(prev)) return prev;
-        return updated;
+        return JSON.stringify(updated) === JSON.stringify(prev) ? prev : updated;
       });
+
+      const loanRes = await loanService.getAllLoans();
+      const raw = Array.isArray(loanRes) ? loanRes : (loanRes as any).loans || [];
+      const mapped = raw.map((l: any) => ({
+        id: l.loan_id, customerId: l.customer_id, accountId: l.account_id,
+        policyId: l.policy_id, loanAmount: l.loan_amount, approvedAmount: l.approved_amount,
+        durationMonths: l.duration_months, startDate: l.start_date, endDate: l.end_date,
+        status: l.status, autoDeduct: l.auto_deduct, createdAt: l.created_at,
+        loanType: l.loan_type, interestRate: l.interest_rate, minAmount: l.min_amount,
+        maxAmount: l.max_amount, minMonths: l.min_months, maxMonths: l.max_months,
+        staffApprovalStatus: l.staff_approval_status, staffApprovalRemarks: l.staff_approval_remarks,
+        adminApprovalStatus: l.admin_approval_status, adminApprovalRemarks: l.admin_approval_remarks,
+      }));
+      setLoans(prev => JSON.stringify(prev) === JSON.stringify(mapped) ? prev : mapped);
+
+      if (activeTab === "transactions" && selectedAccount) {
+        const txRes = await transactionService.getByAccount(selectedAccount.id);
+        setTransactions((txRes as any).transactions || []);
+        setFilteredTransactions((txRes as any).transactions || []);
+      }
     } catch (_) { }
   };
 
@@ -189,28 +223,14 @@ export default function CustomerDashboard() {
       const response = await loanService.getAllLoans();
       const raw = Array.isArray(response) ? response : (response as any).loans || [];
       const mapped = raw.map((l: any) => ({
-        id: l.loan_id,
-        customerId: l.customer_id,
-        accountId: l.account_id,
-        policyId: l.policy_id,
-        loanAmount: l.loan_amount,
-        approvedAmount: l.approved_amount,
-        durationMonths: l.duration_months,
-        startDate: l.start_date,
-        endDate: l.end_date,
-        status: l.status,
-        autoDeduct: l.auto_deduct,
-        createdAt: l.created_at,
-        loanType: l.loan_type,
-        interestRate: l.interest_rate,
-        minAmount: l.min_amount,
-        maxAmount: l.max_amount,
-        minMonths: l.min_months,
-        maxMonths: l.max_months,
-        staffApprovalStatus: l.staff_approval_status,
-        staffApprovalRemarks: l.staff_approval_remarks,
-        adminApprovalStatus: l.admin_approval_status,
-        adminApprovalRemarks: l.admin_approval_remarks,
+        id: l.loan_id, customerId: l.customer_id, accountId: l.account_id,
+        policyId: l.policy_id, loanAmount: l.loan_amount, approvedAmount: l.approved_amount,
+        durationMonths: l.duration_months, startDate: l.start_date, endDate: l.end_date,
+        status: l.status, autoDeduct: l.auto_deduct, createdAt: l.created_at,
+        loanType: l.loan_type, interestRate: l.interest_rate, minAmount: l.min_amount,
+        maxAmount: l.max_amount, minMonths: l.min_months, maxMonths: l.max_months,
+        staffApprovalStatus: l.staff_approval_status, staffApprovalRemarks: l.staff_approval_remarks,
+        adminApprovalStatus: l.admin_approval_status, adminApprovalRemarks: l.admin_approval_remarks,
       }));
       setLoans(mapped);
     } catch (err) { console.error("Failed to load loans:", err); }
@@ -223,14 +243,14 @@ export default function CustomerDashboard() {
     else if (activeTab === "loans") await loadLoans();
   };
 
-  // Poll every 10s for balance refresh
-  useEffect(() => {
-    pollingRef.current = setInterval(silentRefreshAccounts, 10000);
-    return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
-  }, []);
+  const anyModalOpenCustomer =
+    showCreateAccount || showWithdraw || showTransfer || showLoanForm || showProfileModal;
+
+  usePolling(silentRefreshAll, { intervalMs: 5000, paused: anyModalOpenCustomer });
 
   useEffect(() => { setFilteredTransactions(transactions); }, [transactions]);
   useEffect(() => { loadAccounts(); }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (activeTab === "transactions" && selectedAccount) loadTransactions();
     else if (activeTab === "loans") loadLoans();
@@ -280,6 +300,21 @@ export default function CustomerDashboard() {
     } catch (err: any) { toast.error(err.message || "Transfer failed"); }
   };
 
+  const handleRequestClosure = async () => {
+    if (!showClosureConfirm) return;
+    setClosureLoading(true);
+    try {
+      await accountService.requestClosure(showClosureConfirm.id);
+      toast.success("Account closure request submitted. Awaiting admin approval.");
+      setShowClosureConfirm(null);
+      await silentRefreshAll();
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || "Failed to submit closure request.");
+    } finally {
+      setClosureLoading(false);
+    }
+  };
+
   const handleApplyLoan = async (e: React.FormEvent) => {
     e.preventDefault();
     const policy_id = LOAN_POLICY_MAP[loanForm.loanType];
@@ -306,13 +341,8 @@ export default function CustomerDashboard() {
 
   // ── REPAYMENT SCHEDULE ────────────────────────────────────────────
   const loadRepaymentSchedule = async (loanId: number) => {
-    // Toggle: if already loaded, hide it
     if (repaymentSchedules[loanId]) {
-      setRepaymentSchedules(prev => {
-        const next = { ...prev };
-        delete next[loanId];
-        return next;
-      });
+      setRepaymentSchedules(prev => { const next = { ...prev }; delete next[loanId]; return next; });
       return;
     }
     setLoadingScheduleId(loanId);
@@ -326,7 +356,6 @@ export default function CustomerDashboard() {
     }
   };
 
-  // Toggle a repayment ID in the balloon selection for a given loan
   const toggleRepaymentSelection = (loanId: number, repaymentId: number) => {
     setSelectedRepaymentIds(prev => {
       const set = new Set(prev[loanId] || []);
@@ -336,28 +365,18 @@ export default function CustomerDashboard() {
     });
   };
 
-  // Pay selected installments (single or balloon)
   const handlePaySelected = async (loan: LoanRequest) => {
     const selected = selectedRepaymentIds[loan.id];
-    if (!selected || selected.size === 0)
-      return toast.error("Please select at least one installment to pay.");
-
+    if (!selected || selected.size === 0) return toast.error("Please select at least one installment to pay.");
     const fromAccountId = loan.accountId || activeAccounts[0]?.id;
     if (!fromAccountId) return toast.error("No active account found for payment.");
-
     try {
       await loanService.payInstallment(loan.id, {
         repayment_ids: Array.from(selected),
         from_account_id: fromAccountId,
       });
-
       const count = selected.size;
-      toast.success(count > 1
-        ? `Balloon payment: ${count} installments paid successfully.`
-        : `Installment paid successfully.`
-      );
-
-      // Clear selection + refresh schedule + refresh accounts
+      toast.success(count > 1 ? `Balloon payment: ${count} installments paid successfully.` : `Installment paid successfully.`);
       setSelectedRepaymentIds(prev => ({ ...prev, [loan.id]: new Set() }));
       const response = await loanService.getRepaymentSchedule(loan.id);
       setRepaymentSchedules(prev => ({ ...prev, [loan.id]: (response as any).schedule || [] }));
@@ -418,6 +437,23 @@ export default function CustomerDashboard() {
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
+        {/* ── FROZEN ACCOUNT BANNER ── */}
+        {frozenAccounts.length > 0 && (
+          <div className="mb-6 p-4 bg-blue-50 border border-blue-300 rounded-xl flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-blue-700 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-semibold text-blue-800">
+                {frozenAccounts.length === 1
+                  ? `Your ${frozenAccounts[0].accountType} account (#${frozenAccounts[0].accountNumber}) is currently frozen.`
+                  : `${frozenAccounts.length} of your accounts are currently frozen.`}
+              </p>
+              <p className="text-xs text-blue-700 mt-1">
+                Frozen accounts cannot be used for withdrawals, transfers, or loan auto-deductions. Please contact your assigned staff or visit a branch.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* BALANCE CARD */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
           <div className="lg:col-span-2 bg-gradient-to-br from-blue-600 to-blue-800 rounded-xl shadow-lg p-6 text-white">
@@ -443,11 +479,11 @@ export default function CustomerDashboard() {
               <CreditCard className="w-12 h-12 text-blue-200" />
             </div>
             <div className="flex space-x-4 mt-6">
-              <button onClick={() => setShowWithdraw(true)} disabled={activeAccounts.length === 0}
+              <button onClick={() => setShowWithdraw(true)} disabled={activeAccounts.length === 0 || selectedAccount?.status?.toLowerCase() === "frozen"}
                 className="flex items-center space-x-2 bg-white text-blue-600 px-4 py-2 rounded-lg font-medium hover:bg-blue-50 transition disabled:opacity-50">
                 <ArrowUpRight className="w-4 h-4" /><span>Withdraw</span>
               </button>
-              <button onClick={() => setShowTransfer(true)} disabled={activeAccounts.length === 0}
+              <button onClick={() => setShowTransfer(true)} disabled={activeAccounts.length === 0 || selectedAccount?.status?.toLowerCase() === "frozen"}
                 className="flex items-center space-x-2 bg-white text-blue-600 px-4 py-2 rounded-lg font-medium hover:bg-blue-50 transition disabled:opacity-50">
                 <Send className="w-4 h-4" /><span>Transfer</span>
               </button>
@@ -531,12 +567,38 @@ export default function CustomerDashboard() {
                           PKR {account.balance?.toLocaleString() || "0"}
                         </p>
                       </div>
+                      {account.status?.toLowerCase() === "frozen" && (
+                        <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 text-blue-700 flex-shrink-0 mt-0.5" />
+                          <div>
+                            <p className="text-xs font-semibold text-blue-800">Account Frozen</p>
+                            <p className="text-xs text-blue-700 mt-0.5">No transactions allowed. Contact your assigned staff to unfreeze.</p>
+                          </div>
+                        </div>
+                      )}
+
                       {account.status?.toLowerCase() === "active" && (
                         <button onClick={e => { e.stopPropagation(); setSelectedAccount(account); setActiveTab("transactions"); }}
                           className="mt-4 w-full bg-blue-50 text-blue-700 py-2 rounded-lg hover:bg-blue-100 transition flex items-center justify-center gap-2">
                           <TrendingUp className="w-4 h-4" />View Transactions
                         </button>
                       )}
+                      {/* Closure actions */}
+                      <div className="mt-3 flex items-center gap-2">
+                        {account.status?.toLowerCase() === "active" && (
+                          <Btn
+                            label="Request Closure"
+                            color="red"
+                            onClick={() => { setShowClosureConfirm(account); }}
+                          />
+                        )}
+                        {account.status?.toLowerCase() === "closure_pending" && (
+                          <span className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium bg-orange-100 text-orange-700">
+                            <Clock className="w-3 h-3" />
+                            Closure Pending Approval
+                          </span>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -657,7 +719,7 @@ export default function CustomerDashboard() {
                               </div>
                               <div className="space-y-3">
                                 {dayTx.map((t: any) => {
-                                  const isCredit = t.type === "CREDIT" || t.type === "credit" || t.type === "DEPOSIT" || t.type === "LOAN_DISBURSEMENT";
+                                  const isCredit = t.direction === "CREDIT";
                                   return (
                                     <div key={t.id} className={`bg-white rounded-xl shadow-sm border hover:shadow-md transition ${isCredit ? "border-l-4 border-l-green-500" : "border-l-4 border-l-red-500"}`}>
                                       <div className="p-4">
@@ -715,36 +777,20 @@ export default function CustomerDashboard() {
                   const schedule = repaymentSchedules[loan.id];
                   const selected = selectedRepaymentIds[loan.id] || new Set<number>();
 
-                  // FIX BUG 1: Use actual interestRate from backend (not hardcoded LOAN_POLICY_DETAILS)
-                  // This ensures the breakdown shown matches the actual installment amounts in the schedule
                   const interestSummary =
                     (loan.status === "ACTIVE" || loan.status === "CLOSED") &&
-                      displayAmount &&
-                      loan.durationMonths &&
-                      loan.interestRate
-                      ? calcInterestSummaryFromRate(
-                        Number(displayAmount),
-                        Number(loan.interestRate),
-                        loan.durationMonths
-                      )
+                      displayAmount && loan.durationMonths && loan.interestRate
+                      ? calcInterestSummaryFromRate(Number(displayAmount), Number(loan.interestRate), loan.durationMonths)
                       : null;
 
-                  // FIX BUG 2: Determine whether to show two-level approval status panel
-                  // Hide it once the loan reaches a terminal/active state to avoid
-                  // "Awaiting admin" showing on already-approved loans.
-                  // Also treat adminApprovalStatus === "APPROVED" as terminal to handle
-                  // cases where the DB loan.status may lag behind the approval columns.
                   const isTerminal =
                     ["ACTIVE", "CLOSED", "DEFAULTED"].includes(loan.status?.toUpperCase()) ||
                     loan.adminApprovalStatus?.toUpperCase() === "APPROVED";
                   const isRejected = loan.status?.toUpperCase() === "REJECTED";
-
-                  // FIX BUG 3: Show repayment schedule for ACTIVE and CLOSED loans
                   const canViewSchedule = loan.status === "ACTIVE" || loan.status === "CLOSED";
 
                   return (
                     <div key={loan.id} className="bg-white rounded-xl shadow-sm border p-6 hover:shadow-md transition">
-                      {/* LOAN HEADER */}
                       <div className="flex justify-between items-start mb-4">
                         <div className="flex items-center gap-2">
                           <div className="p-2 bg-blue-100 rounded-lg">{LoanIcon}</div>
@@ -758,7 +804,6 @@ export default function CustomerDashboard() {
                         </span>
                       </div>
 
-                      {/* LOAN DETAILS GRID */}
                       <div className="grid grid-cols-2 gap-3 mt-4">
                         {loan.interestRate != null && (
                           <div className="bg-gray-50 p-3 rounded-lg">
@@ -774,7 +819,6 @@ export default function CustomerDashboard() {
                         )}
                       </div>
 
-                      {/* INTEREST BREAKDOWN — for active/closed loans using ACTUAL backend rate */}
                       {interestSummary && (
                         <div className="mt-3 p-3 bg-blue-50 rounded-lg space-y-1 text-sm">
                           <p className="font-semibold text-blue-800 mb-2">
@@ -792,42 +836,25 @@ export default function CustomerDashboard() {
                         </div>
                       )}
 
-                      {/* DATES */}
                       <div className="mt-4 space-y-1 text-sm text-gray-600">
                         <p><span className="font-medium">Applied:</span> {loan.createdAt ? new Date(loan.createdAt).toLocaleDateString("en-PK") : "—"}</p>
                         {loan.startDate && <p><span className="font-medium">Start:</span> {new Date(loan.startDate).toLocaleDateString("en-PK")}</p>}
                         {loan.endDate && <p><span className="font-medium">End:</span> {new Date(loan.endDate).toLocaleDateString("en-PK")}</p>}
                       </div>
 
-                      {/* FIX BUG 2: TWO-LEVEL APPROVAL STATUS
-                          Only show this panel when loan is still PENDING (not yet terminal/active).
-                          Once active/closed/defaulted the top badge already communicates the final state. */}
                       {!isTerminal && (
                         <div className="mt-3 space-y-2">
-                          {/* Staff review row */}
-                          <div className={`p-2 rounded-lg text-xs flex items-center gap-2 ${loan.staffApprovalStatus === "APPROVED" ? "bg-green-50 text-green-700" :
-                            loan.staffApprovalStatus === "REJECTED" ? "bg-red-50 text-red-700" :
-                              "bg-yellow-50 text-yellow-700"
-                            }`}>
-                            {loan.staffApprovalStatus === "APPROVED" ? <CheckCircle className="w-3 h-3" /> :
-                              loan.staffApprovalStatus === "REJECTED" ? <XCircle className="w-3 h-3" /> :
-                                <Clock className="w-3 h-3" />}
+                          <div className={`p-2 rounded-lg text-xs flex items-center gap-2 ${loan.staffApprovalStatus === "APPROVED" ? "bg-green-50 text-green-700" : loan.staffApprovalStatus === "REJECTED" ? "bg-red-50 text-red-700" : "bg-yellow-50 text-yellow-700"}`}>
+                            {loan.staffApprovalStatus === "APPROVED" ? <CheckCircle className="w-3 h-3" /> : loan.staffApprovalStatus === "REJECTED" ? <XCircle className="w-3 h-3" /> : <Clock className="w-3 h-3" />}
                             <span>
                               <span className="font-medium">Staff Review:</span>{" "}
                               {loan.staffApprovalStatus ?? "Awaiting Staff"}
                               {loan.staffApprovalRemarks && ` — ${loan.staffApprovalRemarks}`}
                             </span>
                           </div>
-
-                          {/* Admin review row — only show if staff has already acted */}
                           {loan.staffApprovalStatus === "APPROVED" && (
-                            <div className={`p-2 rounded-lg text-xs flex items-center gap-2 ${loan.adminApprovalStatus === "APPROVED" ? "bg-green-50 text-green-700" :
-                              loan.adminApprovalStatus === "REJECTED" ? "bg-red-50 text-red-700" :
-                                "bg-yellow-50 text-yellow-700"
-                              }`}>
-                              {loan.adminApprovalStatus === "APPROVED" ? <CheckCircle className="w-3 h-3" /> :
-                                loan.adminApprovalStatus === "REJECTED" ? <XCircle className="w-3 h-3" /> :
-                                  <Clock className="w-3 h-3" />}
+                            <div className={`p-2 rounded-lg text-xs flex items-center gap-2 ${loan.adminApprovalStatus === "APPROVED" ? "bg-green-50 text-green-700" : loan.adminApprovalStatus === "REJECTED" ? "bg-red-50 text-red-700" : "bg-yellow-50 text-yellow-700"}`}>
+                              {loan.adminApprovalStatus === "APPROVED" ? <CheckCircle className="w-3 h-3" /> : loan.adminApprovalStatus === "REJECTED" ? <XCircle className="w-3 h-3" /> : <Clock className="w-3 h-3" />}
                               <span>
                                 <span className="font-medium">Admin Review:</span>{" "}
                                 {loan.adminApprovalStatus ?? "Awaiting Admin"}
@@ -838,15 +865,12 @@ export default function CustomerDashboard() {
                         </div>
                       )}
 
-                      {/* Show rejection remarks if rejected */}
                       {isRejected && (
                         <div className="mt-3 p-2 bg-red-50 rounded-lg text-xs text-red-700 flex items-start gap-2">
                           <XCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
                           <span>
                             <span className="font-medium">Rejection Reason:</span>{" "}
-                            {loan.staffApprovalStatus === "REJECTED"
-                              ? (loan.staffApprovalRemarks || "No reason provided")
-                              : (loan.adminApprovalRemarks || "No reason provided")}
+                            {loan.staffApprovalStatus === "REJECTED" ? (loan.staffApprovalRemarks || "No reason provided") : (loan.adminApprovalRemarks || "No reason provided")}
                           </span>
                         </div>
                       )}
@@ -856,22 +880,17 @@ export default function CustomerDashboard() {
                           <CheckCircle className="w-3 h-3" /> Loan is Active — Repayments in Progress
                         </div>
                       )}
-
                       {loan.status === "CLOSED" && (
                         <div className="mt-2 p-2 bg-gray-100 rounded-lg text-xs text-gray-700 font-semibold flex items-center gap-1">
                           <CheckCircle className="w-3 h-3 text-gray-500" /> Loan Fully Repaid & Closed
                         </div>
                       )}
-
                       {loan.status === "DEFAULTED" && (
                         <div className="mt-2 p-2 bg-red-100 rounded-lg text-xs text-red-800 font-semibold flex items-center gap-1">
                           <XCircle className="w-3 h-3" /> Loan Defaulted — Please contact support immediately
                         </div>
                       )}
 
-                      {/* FIX BUG 3: REPAYMENT SCHEDULE
-                          Show for ACTIVE loans (can pay) and CLOSED loans (read-only history).
-                          Closed loans show schedule in read-only mode with no payment options. */}
                       {canViewSchedule && (
                         <div className="mt-4">
                           <button
@@ -888,7 +907,6 @@ export default function CustomerDashboard() {
 
                           {schedule && (
                             <div className="mt-4 border rounded-lg overflow-hidden">
-                              {/* Schedule summary */}
                               <div className="bg-gray-50 px-4 py-3 border-b grid grid-cols-3 gap-2 text-center text-xs">
                                 <div>
                                   <div className="text-gray-500">Paid</div>
@@ -906,7 +924,6 @@ export default function CustomerDashboard() {
                                 </div>
                               </div>
 
-                              {/* Balloon payment controls — only for ACTIVE loans */}
                               {loan.status === "ACTIVE" && schedule.some(r => r.status !== "PAID") && (
                                 <div className="px-4 py-3 bg-amber-50 border-b text-xs text-amber-800 flex flex-wrap items-center gap-2">
                                   <span className="font-medium">💡 Balloon payment:</span>
@@ -922,48 +939,31 @@ export default function CustomerDashboard() {
                                 </div>
                               )}
 
-                              {/* Installment rows */}
                               <div className="max-h-80 overflow-y-auto">
                                 {schedule.map(r => {
                                   const isPaid = r.status === "PAID";
                                   const isOverdue = r.status === "OVERDUE" || r.is_overdue;
                                   const isChecked = selected.has(r.repayment_id);
                                   const canPay = loan.status === "ACTIVE" && !isPaid;
-
                                   return (
                                     <div key={r.repayment_id}
-                                      className={`flex items-center gap-3 px-4 py-3 border-b last:border-b-0 transition ${isPaid ? "bg-green-50" :
-                                        isOverdue ? "bg-red-50" :
-                                          isChecked ? "bg-blue-50" : "bg-white hover:bg-gray-50"
-                                        }`}>
-
-                                      {/* Checkbox for unpaid installments on active loans */}
+                                      className={`flex items-center gap-3 px-4 py-3 border-b last:border-b-0 transition ${isPaid ? "bg-green-50" : isOverdue ? "bg-red-50" : isChecked ? "bg-blue-50" : "bg-white hover:bg-gray-50"}`}>
                                       {canPay && (
-                                        <input
-                                          type="checkbox"
-                                          checked={isChecked}
+                                        <input type="checkbox" checked={isChecked}
                                           onChange={() => toggleRepaymentSelection(loan.id, r.repayment_id)}
-                                          className="w-4 h-4 text-blue-600 rounded"
-                                        />
+                                          className="w-4 h-4 text-blue-600 rounded" />
                                       )}
                                       {isPaid && <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />}
                                       {!canPay && !isPaid && <div className="w-4 h-4 flex-shrink-0" />}
-
                                       <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2">
-                                          <span className="text-sm font-medium text-gray-700">
-                                            #{r.installment_no}
-                                          </span>
-                                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${isPaid ? "bg-green-100 text-green-700" :
-                                            isOverdue ? "bg-red-100 text-red-700" :
-                                              "bg-yellow-100 text-yellow-700"
-                                            }`}>
+                                          <span className="text-sm font-medium text-gray-700">#{r.installment_no}</span>
+                                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${isPaid ? "bg-green-100 text-green-700" : isOverdue ? "bg-red-100 text-red-700" : "bg-yellow-100 text-yellow-700"}`}>
                                             {isPaid ? "PAID" : isOverdue ? "OVERDUE" : "PENDING"}
                                           </span>
                                         </div>
                                         <div className="text-xs text-gray-500 mt-0.5">
                                           Due: {new Date(r.due_date).toLocaleDateString("en-PK")}
-                                          {/* FIX BUG 3: Show paid date when installment is paid */}
                                           {isPaid && r.paid_date && (
                                             <span className="ml-1 text-green-600 font-medium">
                                               • Paid: {new Date(r.paid_date).toLocaleDateString("en-PK")}
@@ -971,7 +971,6 @@ export default function CustomerDashboard() {
                                           )}
                                         </div>
                                       </div>
-
                                       <div className="text-right flex-shrink-0">
                                         <div className={`text-sm font-bold ${isPaid ? "text-green-600" : isOverdue ? "text-red-600" : "text-gray-900"}`}>
                                           PKR {Number(r.amount).toLocaleString()}
@@ -985,7 +984,6 @@ export default function CustomerDashboard() {
                           )}
                         </div>
                       )}
-
                     </div>
                   );
                 })}
@@ -996,7 +994,7 @@ export default function CustomerDashboard() {
         )}
       </div>
 
-      {/* MODALS */}
+      {/* ── MODALS ── */}
       <ProfileModal isOpen={showProfileModal} onClose={() => setShowProfileModal(false)} user={user} onProfileUpdate={loadAccounts} />
 
       {/* Create Account Modal */}
@@ -1124,13 +1122,11 @@ export default function CustomerDashboard() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
           <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-lg my-4">
             <h2 className="text-2xl font-bold text-gray-900 mb-4">Apply for Loan</h2>
-
             {activeAccounts.length === 0 && (
               <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
                 ⚠️ You need an active account to apply for a loan.
               </div>
             )}
-
             <form onSubmit={handleApplyLoan} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Select Account</label>
@@ -1143,7 +1139,6 @@ export default function CustomerDashboard() {
                   ))}
                 </select>
               </div>
-
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Loan Type</label>
                 <select value={loanForm.loanType}
@@ -1158,39 +1153,27 @@ export default function CustomerDashboard() {
                   <option value="MEDICAL">Medical Loan — 6–48 months, 10% | PKR 100K–2M</option>
                 </select>
               </div>
-
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Loan Amount (PKR)</label>
                 <input type="number" step="0.01" min="1000" value={loanForm.amount}
                   onChange={e => setLoanForm({ ...loanForm, amount: e.target.value })}
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Enter amount" required />
               </div>
-
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Duration (months)</label>
                 <input type="number" min="1" max="240" value={loanForm.duration}
                   onChange={e => setLoanForm({ ...loanForm, duration: e.target.value })}
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Enter months" required />
               </div>
-
-              {/* Auto-deduct toggle */}
               <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-                <input
-                  type="checkbox"
-                  id="autoDeduct"
-                  checked={loanForm.autoDeduct}
+                <input type="checkbox" id="autoDeduct" checked={loanForm.autoDeduct}
                   onChange={e => setLoanForm({ ...loanForm, autoDeduct: e.target.checked })}
-                  className="w-4 h-4 text-blue-600 rounded"
-                />
+                  className="w-4 h-4 text-blue-600 rounded" />
                 <label htmlFor="autoDeduct" className="text-sm text-gray-700 cursor-pointer">
                   <span className="font-medium">Enable Auto-Deduction</span>
-                  <span className="block text-xs text-gray-500 mt-0.5">
-                    Monthly installment auto-deducted from selected account on due date
-                  </span>
+                  <span className="block text-xs text-gray-500 mt-0.5">Monthly installment auto-deducted from selected account on due date</span>
                 </label>
               </div>
-
-              {/* LIVE INTEREST PREVIEW */}
               {loanPreview && (
                 <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg text-sm space-y-2">
                   <p className="font-semibold text-blue-800">📊 Loan Preview (Simple Interest @ {loanPreview.rate}% p.a.)</p>
@@ -1205,9 +1188,8 @@ export default function CustomerDashboard() {
                   )}
                 </div>
               )}
-
               <div className="flex space-x-3">
-                <button type="submit" disabled={activeAccounts.length === 0}
+                <button type="submit" disabled={activeAccounts.length === 0 || selectedAccount?.status?.toLowerCase() === "frozen"}
                   className="flex-1 bg-green-600 text-white py-3 rounded-lg font-semibold hover:bg-green-700 transition disabled:opacity-50 disabled:cursor-not-allowed">
                   Apply
                 </button>
@@ -1218,6 +1200,56 @@ export default function CustomerDashboard() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── ACCOUNT CLOSURE CONFIRM MODAL ── */}
+      {showClosureConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
+                <XCircle className="w-5 h-5 text-red-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Close Account</h3>
+                <p className="text-sm text-gray-500">This action cannot be undone</p>
+              </div>
+            </div>
+
+            <div className="bg-gray-50 rounded-lg p-4 mb-5 space-y-2">
+              <InfoRow label="Account Number" value={String(showClosureConfirm.accountNumber)} />
+              <InfoRow label="Account Type" value={String(showClosureConfirm.accountType)} />
+              <InfoRow label="Current Balance" value={`PKR ${(showClosureConfirm.balance || 0).toLocaleString()}`} />
+            </div>
+
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-5">
+              <p className="text-xs text-yellow-800 font-medium mb-1">What happens to your balance?</p>
+              <p className="text-xs text-yellow-700">
+                If you have a second active account, your balance will be transferred to it automatically.
+                Otherwise, it will be processed as a final cash withdrawal at the branch.
+              </p>
+            </div>
+
+            <p className="text-sm text-gray-600 mb-5">
+              Your request will be reviewed by our team. You cannot perform any transactions while closure is pending.
+            </p>
+
+            <div className="flex gap-3">
+              <button
+                onClick={handleRequestClosure}
+                disabled={closureLoading}
+                className="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 text-sm font-medium disabled:opacity-60">
+                {closureLoading ? "Submitting..." : "Confirm Closure Request"}
+              </button>
+              <button
+                onClick={() => setShowClosureConfirm(null)}
+                disabled={closureLoading}
+                className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 text-sm">
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

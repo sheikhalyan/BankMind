@@ -10,6 +10,11 @@ const {
   getMyAccounts,
   getAccountsByCustomer,
   getUserAssociatedAccounts,
+  requestAccountClosure,
+  getClosurePendingAccounts,
+  approveAccountClosure,
+  freezeAccount,
+  unfreezeAccount,
 } = require('../controllers/accountController');
 
 const {
@@ -17,6 +22,7 @@ const {
   isStaff,
   isStaffOrAdmin,
   isCustomer,
+  isAdmin,
 } = require('../middlewares/authMiddleware');
 
 // ─────────────────────────────────────────────────────────────────
@@ -28,6 +34,28 @@ router.post('/', verifyToken, isCustomer, createAccount);
 
 // GET  /api/accounts/my           — customer views their own accounts
 router.get('/my', verifyToken, isCustomer, getMyAccounts);
+
+
+
+// ─────────────────────────────────────────────────────────────────
+//  ACCOUNT CLOSURE
+// ─────────────────────────────────────────────────────────────────
+
+// POST /api/accounts/:accountId/request-closure  — customer requests closure
+router.post('/:accountId/request-closure', verifyToken, isCustomer, requestAccountClosure);
+
+// GET  /api/accounts/closure-pending             — staff/admin views pending closures
+router.get('/closure-pending', verifyToken, isStaffOrAdmin, getClosurePendingAccounts);
+
+// PUT  /api/accounts/:accountId/approve-closure  — staff/admin approves closure
+router.put('/:accountId/approve-closure', verifyToken, isStaffOrAdmin, approveAccountClosure);
+
+// PUT /api/accounts/:accountId/freeze   — admin only
+router.put('/:accountId/freeze', verifyToken, isAdmin, freezeAccount);
+
+// PUT /api/accounts/:accountId/unfreeze — admin only
+router.put('/:accountId/unfreeze', verifyToken, isAdmin, unfreezeAccount);
+
 
 // ─────────────────────────────────────────────────────────────────
 //  STAFF / ADMIN READ

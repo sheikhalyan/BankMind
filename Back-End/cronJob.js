@@ -1,36 +1,30 @@
 /**
  * cronJob.js
- * ──────────────────────────────────────────────────────────────────
- * BankMind Scheduled Jobs
- *
- * Requires:  npm install node-cron
  *
  * Jobs:
  *   1. 00:05 daily  → Mark overdue installments
  *   2. 00:10 daily  → Run auto-deduction for all eligible loans
  *
- * Usage:
- *   Require this file once in your server entry point:
- *     require('./cronJob');   // in app.js / server.js
+ * Timezone: Asia/Karachi
  *
- * The cron schedules run in the server's local timezone.
- * To lock to a specific timezone, pass { timezone: "Asia/Karachi" }
- * in each cron.schedule() options object.
- * ──────────────────────────────────────────────────────────────────
+ * HOW IT WORKS:
+ *   - This file is loaded once by server.js via require('./cronJob')
+ *   - node-cron registers two alarms inside the running Node process
+ *   - Every day at the scheduled times, the job functions fire automatically
+ *   - Server must be running for jobs to fire — no job fires if server is off
  */
 
 const cron = require('node-cron');
 const { getPool, sql } = require('./config/db');
+const { processDeductions } = require('./controllers/Loanrepaymentcontroller');
 const {
     notifyCustomer,
-    notifyStaff,
-    notifyAdmins,
 } = require('./utils/notifications');
 
 // ── TIMEZONE ──────────────────────────────────────────────────────
 const TIMEZONE = 'Asia/Karachi';
 
-// ── LOGGER (simple console wrapper — swap for Winston if available) ─
+// ── LOGGER ────────────────────────────────────────────────────────
 const log = (level, msg, data) => {
     const ts = new Date().toISOString();
     const prefix = `[CRON][${ts}][${level.toUpperCase()}]`;
@@ -39,167 +33,8 @@ const log = (level, msg, data) => {
 };
 
 // ================================================================
-//  INTERNAL HELPER — deduction logic (same as Loanrepaymentcontroller)
-// ================================================================
-async function processDeductions(pool, loan, repayments) {
-    const results = [];
-
-    for (const repayment of repayments) {
-        const balResult = await pool.request()
-            .input('account_id', sql.Int, loan.account_id)
-            .query(`SELECT balance FROM Accounts WHERE account_id = @account_id`);
-        const currentBalance = parseFloat(balResult.recordset[0]?.balance || 0);
-        const amount = parseFloat(repayment.amount);
-
-        if (currentBalance < amount) {
-            // Log failure
-            await pool.request()
-                .input('loan_id', sql.Int, loan.loan_id)
-                .input('repayment_id', sql.Int, repayment.repayment_id)
-                .input('from_account_id', sql.Int, loan.account_id)
-                .input('amount', sql.Decimal(15, 2), amount)
-                .input('failure_reason', sql.NVarChar, 'Insufficient balance')
-                .query(`
-                    INSERT INTO Loan_Auto_Deductions
-                        (loan_id, repayment_id, from_account_id, amount, status, failure_reason)
-                    VALUES
-                        (@loan_id, @repayment_id, @from_account_id, @amount, 'FAILED', @failure_reason)
-                `);
-
-            // 3 failures in 90 days → DEFAULTED
-            const failCount = await pool.request()
-                .input('loan_id', sql.Int, loan.loan_id)
-                .query(`
-                    SELECT COUNT(*) AS cnt FROM Loan_Auto_Deductions
-                    WHERE  loan_id = @loan_id AND status = 'FAILED'
-                      AND  attempted_at >= DATEADD(DAY, -90, GETDATE())
-                `);
-
-            if (failCount.recordset[0].cnt >= 3) {
-                await pool.request()
-                    .input('loan_id', sql.Int, loan.loan_id)
-                    .query(`UPDATE Loans SET status = 'DEFAULTED' WHERE loan_id = @loan_id`);
-
-                await Promise.all([
-                    notifyCustomer({
-                        customer_id: loan.customer_id,
-                        type: 'LOAN_DEFAULTED',
-                        message: `Your ${loan.loan_type} loan has been marked DEFAULTED due to 3 failed auto-deductions in 90 days. Please contact support immediately.`,
-                        related_id: Number(loan.loan_id),
-                        related_type: 'LOAN',
-                    }),
-                    loan.staff_id && notifyStaff({
-                        user_id: loan.staff_id,
-                        type: 'LOAN_DEFAULTED',
-                        message: `Customer "${loan.customer_name}" ${loan.loan_type} loan marked DEFAULTED.`,
-                        related_id: Number(loan.loan_id),
-                        related_type: 'LOAN',
-                    }),
-                    notifyAdmins({
-                        type: 'LOAN_DEFAULTED',
-                        message: `Customer "${loan.customer_name}" ${loan.loan_type} loan DEFAULTED after 3 failed auto-deductions.`,
-                        related_id: Number(loan.loan_id),
-                        related_type: 'LOAN',
-                    }),
-                ].filter(Boolean));
-
-                results.push({ repayment_id: repayment.repayment_id, status: 'DEFAULTED' });
-                break;
-            }
-
-            await notifyCustomer({
-                customer_id: loan.customer_id,
-                type: 'AUTO_DEDUCTION_FAILED',
-                message: `Auto-deduction failed for installment #${repayment.installment_no} of PKR ${amount.toLocaleString()}. Insufficient balance. Please pay manually.`,
-                related_id: Number(loan.loan_id),
-                related_type: 'LOAN',
-            });
-
-            if (loan.staff_id) {
-                await notifyStaff({
-                    user_id: loan.staff_id,
-                    type: 'AUTO_DEDUCTION_FAILED',
-                    message: `Auto-deduction failed for customer "${loan.customer_name}" installment #${repayment.installment_no}.`,
-                    related_id: Number(loan.loan_id),
-                    related_type: 'LOAN',
-                });
-            }
-
-            results.push({ repayment_id: repayment.repayment_id, status: 'FAILED', reason: 'Insufficient balance' });
-            continue;
-        }
-
-        // SUCCESS — DB transaction
-        const dbTx = pool.transaction();
-        await dbTx.begin();
-        let transactionId;
-
-        try {
-            await dbTx.request()
-                .input('amount', sql.Decimal(15, 2), amount)
-                .input('account_id', sql.Int, loan.account_id)
-                .query(`UPDATE Accounts SET balance = balance - @amount WHERE account_id = @account_id`);
-
-            const txResult = await dbTx.request()
-                .input('from_account_id', sql.Int, loan.account_id)
-                .input('amount', sql.Decimal(15, 2), amount)
-                .input('description', sql.NVarChar,
-                    `Auto loan repayment - Installment #${repayment.installment_no} for loan #${loan.loan_id}`)
-                .query(`
-                    INSERT INTO Transactions (from_account_id, transaction_type, amount, description)
-                    OUTPUT INSERTED.transaction_id
-                    VALUES (@from_account_id, 'LOAN_REPAYMENT', @amount, @description)
-                `);
-
-            transactionId = txResult.recordset[0].transaction_id;
-
-            await dbTx.request()
-                .input('repayment_id', sql.Int, repayment.repayment_id)
-                .input('transaction_id', sql.Int, transactionId)
-                .query(`
-                    UPDATE Loan_Repayments
-                    SET    status = 'PAID', paid_date = CAST(GETDATE() AS DATE), transaction_id = @transaction_id
-                    WHERE  repayment_id = @repayment_id
-                `);
-
-            await dbTx.request()
-                .input('loan_id', sql.Int, loan.loan_id)
-                .input('repayment_id', sql.Int, repayment.repayment_id)
-                .input('from_account_id', sql.Int, loan.account_id)
-                .input('amount', sql.Decimal(15, 2), amount)
-                .input('transaction_id', sql.Int, transactionId)
-                .query(`
-                    INSERT INTO Loan_Auto_Deductions
-                        (loan_id, repayment_id, from_account_id, amount, status, transaction_id)
-                    VALUES
-                        (@loan_id, @repayment_id, @from_account_id, @amount, 'SUCCESS', @transaction_id)
-                `);
-
-            await dbTx.commit();
-
-        } catch (txErr) {
-            try { await dbTx.rollback(); } catch (_) { }
-            results.push({ repayment_id: repayment.repayment_id, status: 'FAILED', reason: txErr.message });
-            continue;
-        }
-
-        await notifyCustomer({
-            customer_id: loan.customer_id,
-            type: 'AUTO_DEDUCTION_SUCCESS',
-            message: `Auto-deduction of PKR ${amount.toLocaleString()} for installment #${repayment.installment_no} was successful.`,
-            related_id: transactionId,
-            related_type: 'TRANSACTION',
-        });
-
-        results.push({ repayment_id: repayment.repayment_id, status: 'SUCCESS', transaction_id: transactionId });
-    }
-
-    return results;
-}
-
-// ================================================================
 //  JOB 1 — Mark overdue installments
-//  Runs at 00:05 every day
+//  Runs at 00:05 daily
 //  Updates all PENDING installments whose due_date < today → OVERDUE
 // ================================================================
 async function jobMarkOverdue() {
@@ -215,15 +50,15 @@ async function jobMarkOverdue() {
         const count = result.rowsAffected[0];
         log('info', `JOB 1 DONE — ${count} installment(s) marked OVERDUE`);
     } catch (err) {
-        log('error', 'JOB 1 FAILED — markOverdue error', err.message);
+        log('error', 'JOB 1 FAILED', err.message);
     }
 }
 
 // ================================================================
 //  JOB 2 — Auto-deduction for all eligible loans
-//  Runs at 00:10 every day
-//  Processes loans where today matches the loan's start day of month
-//  and auto_deduct = 1 and loan is ACTIVE
+//  Runs at 00:10 daily (after Job 1 marks overdue)
+//  Only processes loans where today matches the loan's start day
+//  e.g. loan started on 15th → only deducts on 15th of each month
 // ================================================================
 async function jobAutoDeductAll() {
     log('info', 'JOB 2 START — Auto-deduction for all loans');
@@ -270,7 +105,7 @@ async function jobAutoDeductAll() {
 
         for (const loan of loansResult.recordset) {
             try {
-                // Only process 1 installment per loan per run (monthly cycle)
+                // Process only the earliest unpaid installment per loan per run
                 const dueResult = await pool.request()
                     .input('loan_id', sql.Int, loan.loan_id)
                     .query(`
@@ -281,14 +116,22 @@ async function jobAutoDeductAll() {
                         ORDER BY installment_no ASC
                     `);
 
-                if (dueResult.recordset.length === 0) continue;
+                if (dueResult.recordset.length === 0) {
+                    log('info', `Loan #${loan.loan_id} — no due installment found, skipping`);
+                    continue;
+                }
 
+                // processDeductions is imported from loanRepaymentController
                 const results = await processDeductions(pool, loan, dueResult.recordset);
 
                 // Check if all installments paid → close loan
                 const remaining = await pool.request()
                     .input('loan_id', sql.Int, loan.loan_id)
-                    .query(`SELECT COUNT(*) AS cnt FROM Loan_Repayments WHERE loan_id = @loan_id AND status != 'PAID'`);
+                    .query(`
+                        SELECT COUNT(*) AS cnt
+                        FROM   Loan_Repayments
+                        WHERE  loan_id = @loan_id AND status != 'PAID'
+                    `);
 
                 if (remaining.recordset[0].cnt === 0) {
                     await pool.request()
@@ -318,7 +161,7 @@ async function jobAutoDeductAll() {
         log('info', `JOB 2 DONE — Processed ${summary.length} loan(s)`);
 
     } catch (err) {
-        log('error', 'JOB 2 FAILED — autoDeductAll error', err.message);
+        log('error', 'JOB 2 FAILED', err.message);
     }
 }
 
@@ -327,14 +170,10 @@ async function jobAutoDeductAll() {
 // ================================================================
 
 // Job 1: Mark overdue — 00:05 daily
-cron.schedule('5 0 * * *', jobMarkOverdue, {
-    timezone: TIMEZONE,
-});
+cron.schedule('5 0 * * *', jobMarkOverdue, { timezone: TIMEZONE });
 
-// Job 2: Auto-deduction — 00:10 daily (runs after overdue marking)
-cron.schedule('10 0 * * *', jobAutoDeductAll, {
-    timezone: TIMEZONE,
-});
+// Job 2: Auto-deduction — 00:10 daily
+cron.schedule('10 0 * * *', jobAutoDeductAll, { timezone: TIMEZONE });
 
 log('info', `Cron jobs registered (timezone: ${TIMEZONE})`);
 log('info', '  Job 1 — Mark overdue       → 00:05 daily');

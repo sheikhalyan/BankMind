@@ -3,6 +3,7 @@ import { useAuth } from "../context/AuthContext";
 import { adminService } from "../services/admin";
 import { loanService } from "../services/loan";
 import { api } from "../services/api";
+import { usePolling } from "../hooks/usePolling";
 import {
   UserCheck, Building, RefreshCw, LogOut, Search, Clock,
   AlertCircle, CheckCircle, XCircle, User as UserIcon,
@@ -12,6 +13,7 @@ import {
 import NotificationBell from "../components/NotificationBell";
 import ProfileModal from "../components/ProfileModal";
 import { navigate } from "../components/Router";
+import { accountService } from "../services/account";
 
 // ================================================================
 //  TYPES
@@ -123,7 +125,7 @@ interface Repayment {
   transaction_id: number | null;
 }
 
-type TabType = "overview" | "staff" | "customers" | "loans" | "loan-policies";
+type TabType = "overview" | "staff" | "customers" | "loans" | "loan-policies" | "accounts";
 type StaffFilter = "ALL" | "PENDING" | "ACTIVE" | "REJECTED" | "SUSPENDED";
 type CustomerFilter = "ALL" | "PENDING" | "ACTIVE" | "REJECTED" | "SUSPENDED" | "AWAITING_ADMIN";
 type LoanFilter = "AWAITING_ADMIN" | "ALL" | "PENDING" | "ACTIVE" | "REJECTED";
@@ -147,9 +149,11 @@ const getStatusBadge = (status: string = "") => {
     case "PAID": return { bg: "bg-green-100", text: "text-green-800", icon: <CheckCircle className="w-3 h-3" /> };
     case "OVERDUE": return { bg: "bg-red-100", text: "text-red-800", icon: <AlertCircle className="w-3 h-3" /> };
     case "FAILED": return { bg: "bg-red-100", text: "text-red-800", icon: <XCircle className="w-3 h-3" /> };
+    case "FROZEN": return { bg: "bg-blue-100", text: "text-blue-800", icon: <AlertCircle className="w-3 h-3" /> };
     default: return { bg: "bg-gray-100", text: "text-gray-800", icon: <AlertCircle className="w-3 h-3" /> };
   }
 };
+
 
 // ================================================================
 //  LOAN DETAIL MODAL
@@ -493,6 +497,14 @@ export default function AdminDashboard() {
   const [loans, setLoans] = useState<Loan[]>([]);
   const [selectedLoan, setSelectedLoan] = useState<Loan | null>(null);
 
+  const [allAccounts, setAllAccounts] = useState<any[]>([]);
+  const [closureActionLoading, setClosureActionLoading] = useState<number | null>(null);
+  const [accountSearch, setAccountSearch] = useState("");
+  const [accountStatusFilter, setAccountStatusFilter] = useState<string>("ALL");
+  const [freezeModal, setFreezeModal] = useState<{ account: any } | null>(null);
+  const [freezeReason, setFreezeReason] = useState("");
+  const [freezeLoading, setFreezeLoading] = useState(false);
+
   // Staff creation
   const [showCreateStaff, setShowCreateStaff] = useState(false);
   const [newStaff, setNewStaff] = useState({ fullName: "", email: "", password: "" });
@@ -501,6 +513,9 @@ export default function AdminDashboard() {
   const [editingPolicyId, setEditingPolicyId] = useState<number | null>(null);
   const [editingValues, setEditingValues] = useState<EditingPolicy | null>(null);
   const [savingPolicy, setSavingPolicy] = useState(false);
+
+
+
 
   const showMsg = (type: "success" | "error", text: string) => {
     setMessage({ type, text });
@@ -523,13 +538,38 @@ export default function AdminDashboard() {
     } catch (e) { console.error("fetchLoans", e); }
   };
 
+  const fetchAllAccounts = async () => {
+    try {
+      const res = await accountService.getAllWithDetails();
+      const list = Array.isArray(res) ? res : (res as any).accounts || [];
+      setAllAccounts(list);
+    } catch (e) { console.error("fetchAllAccounts", e); }
+  };
+
+
+
   const fetchAll = async () => {
     setLoading(true);
-    await Promise.all([fetchStats(), fetchStaff(), fetchCustomers(), fetchLoanPolicies(), fetchLoans()]);
+    await Promise.all([fetchStats(), fetchStaff(), fetchCustomers(), fetchLoanPolicies(), fetchLoans(), fetchAllAccounts()]);
     setLoading(false);
   };
 
+
+  const silentFetchAll = async () => {
+    await Promise.all([fetchStats(), fetchStaff(), fetchCustomers(), fetchLoanPolicies(), fetchLoans(), fetchAllAccounts()]);
+  };
+
+  // Pause polling when a modal is open (loan detail modal etc.)
+  const anyModalOpen = !!selectedLoan || showCreateStaff || showProfileModal || !!editingPolicyId || !!freezeModal;
+
+  usePolling(silentFetchAll, {
+    intervalMs: 5000,
+    paused: anyModalOpen,
+  });
+
+  // Keep the initial full-loading fetch:
   useEffect(() => { fetchAll(); }, []);
+
 
   // ----------------------------------------------------------------
   // FILTERED LISTS
@@ -563,6 +603,16 @@ export default function AdminDashboard() {
   const awaitingAdminCount = loans.filter(
     l => l.status === "PENDING" && l.staff_approval_status === "APPROVED" && !l.admin_approval_status
   ).length;
+
+  const closurePendingCount = allAccounts.filter(a => a.status === "CLOSURE_PENDING").length;
+
+  const filteredAccounts = allAccounts
+    .filter(a => accountStatusFilter === "ALL" || a.status === accountStatusFilter)
+    .filter(a =>
+      a.account_number?.toLowerCase().includes(accountSearch.toLowerCase()) ||
+      a.customer_name?.toLowerCase().includes(accountSearch.toLowerCase()) ||
+      a.customer_email?.toLowerCase().includes(accountSearch.toLowerCase())
+    );
 
   // ----------------------------------------------------------------
   // STAFF ACTIONS
@@ -618,6 +668,47 @@ export default function AdminDashboard() {
       if (selectedLoan?.loan_id === loanId)
         setSelectedLoan(prev => prev ? { ...prev, auto_deduct: !current } : prev);
     } catch (e: any) { showMsg("error", e.message || "Failed to toggle auto-deduction."); throw e; }
+  };
+
+  const handleApproveClosure = async (accountId: number) => {
+    setClosureActionLoading(accountId);
+    try {
+      await accountService.approveClosure(accountId);
+      showMsg("success", "Account closed successfully.");
+      fetchAllAccounts();
+      fetchStats();
+    } catch (e: any) {
+      showMsg("error", e.response?.data?.message || e.message || "Failed to close account.");
+    } finally {
+      setClosureActionLoading(null);
+    }
+  };
+
+  const handleFreezeAccount = async () => {
+    if (!freezeModal) return;
+    if (!freezeReason.trim()) return showMsg("error", "Freeze reason is required.");
+    setFreezeLoading(true);
+    try {
+      await accountService.freeze(freezeModal.account.account_id, freezeReason);
+      showMsg("success", `Account ${freezeModal.account.account_number} frozen.`);
+      setFreezeModal(null);
+      setFreezeReason("");
+      fetchAllAccounts();
+    } catch (e: any) {
+      showMsg("error", e.response?.data?.message || "Failed to freeze account.");
+    } finally {
+      setFreezeLoading(false);
+    }
+  };
+
+  const handleUnfreezeAccount = async (accountId: number) => {
+    try {
+      await accountService.unfreeze(accountId);
+      showMsg("success", "Account unfrozen successfully.");
+      fetchAllAccounts();
+    } catch (e: any) {
+      showMsg("error", e.response?.data?.message || "Failed to unfreeze account.");
+    }
   };
 
   // ----------------------------------------------------------------
@@ -682,6 +773,7 @@ export default function AdminDashboard() {
                 { id: "customers", label: "Customers", icon: Building, badge: stats?.customers_awaiting_admin },
                 { id: "loans", label: "Loans", icon: CreditCard, badge: awaitingAdminCount || undefined },
                 { id: "loan-policies", label: "Loan Policies", icon: FileText, badge: undefined },
+                { id: "accounts", label: "Accounts", icon: CreditCard, badge: closurePendingCount || undefined },
               ] satisfies { id: TabType; label: string; icon: React.ElementType; badge: number | undefined }[]).map(tab => (
                 <button key={tab.id} onClick={() => { setActiveTab(tab.id); setSearchTerm(""); }}
                   className={`px-5 py-3 flex items-center gap-2 border-b-2 transition ${activeTab === tab.id ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
@@ -1013,6 +1105,124 @@ export default function AdminDashboard() {
               </div>
             )}
 
+            {/* ── ACCOUNTS TAB ── */}
+            {activeTab === "accounts" && (
+              <div>
+                <div className="flex justify-between items-center mb-4">
+                  <h2 className="text-lg font-semibold text-gray-900">All Accounts</h2>
+                  {closurePendingCount > 0 && (
+                    <span className="bg-orange-100 text-orange-700 text-sm font-medium px-3 py-1 rounded-full">
+                      {closurePendingCount} pending closure
+                    </span>
+                  )}
+                </div>
+
+                {/* Filters */}
+                <div className="flex flex-wrap gap-2 mb-4">
+                  {["ALL", "ACTIVE", "FROZEN", "PENDING", "CLOSURE_PENDING", "CLOSED", "REJECTED"].map(f => (
+                    <FilterBtn
+                      key={f}
+                      label={f === "CLOSURE_PENDING" ? "Closure Pending" : f}
+                      active={accountStatusFilter === f}
+                      onClick={() => setAccountStatusFilter(f)}
+                      highlight={f === "CLOSURE_PENDING"}
+                    />
+                  ))}
+                  <div className="ml-auto relative">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-4 h-4" />
+                    <input
+                      type="text"
+                      placeholder="Search by account, customer..."
+                      value={accountSearch}
+                      onChange={e => setAccountSearch(e.target.value)}
+                      className="pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm w-64"
+                    />
+                  </div>
+                </div>
+
+                {filteredAccounts.length === 0 ? (
+                  <EmptyState icon={CreditCard} message="No accounts found" />
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          {["Account No.", "Customer", "Assigned Staff", "Type", "Balance", "Status", "Opened", "Closed", "Actions"].map(h => (
+                            <th key={h} className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {filteredAccounts.map(account => {
+                          const badge = getStatusBadge(account.status);
+                          const isClosure = account.status === "CLOSURE_PENDING";
+                          return (
+                            <tr key={account.account_id} className={`hover:bg-gray-50 ${isClosure ? "bg-orange-50" : ""}`}>
+                              <td className="px-3 py-3 text-sm font-mono text-gray-700">{account.account_number}</td>
+                              <td className="px-3 py-3">
+                                <p className="text-sm font-medium text-gray-900">{account.customer_name}</p>
+                                <p className="text-xs text-gray-400">{account.customer_email}</p>
+                              </td>
+                              <td className="px-3 py-3">
+                                <p className="text-sm text-gray-700">{account.assigned_staff_name || "—"}</p>
+                              </td>
+                              <td className="px-3 py-3">
+                                <span className="text-xs font-medium px-2 py-1 bg-blue-100 text-blue-700 rounded-full">
+                                  {account.account_type}
+                                </span>
+                              </td>
+                              <td className="px-3 py-3 text-sm font-semibold text-gray-800 whitespace-nowrap">
+                                {formatCurrency(account.balance)}
+                              </td>
+                              <td className="px-3 py-3">
+                                <span className={`inline-flex items-center gap-1 px-2 py-1 text-xs rounded-full ${badge.bg} ${badge.text}`}>
+                                  {badge.icon}{account.status}
+                                </span>
+                              </td>
+                              <td className="px-3 py-3 text-sm text-gray-500 whitespace-nowrap">
+                                {formatDate(account.opened_date)}
+                              </td>
+                              <td className="px-3 py-3 text-sm text-gray-500 whitespace-nowrap">
+                                {account.closed_date ? formatDate(account.closed_date) : "—"}
+                              </td>
+                              <td className="px-3 py-3">
+                                <div className="flex flex-wrap gap-1">
+                                  {account.status === "ACTIVE" && (
+                                    <ActionBtn
+                                      label="Freeze"
+                                      color="orange"
+                                      onClick={() => setFreezeModal({ account })}
+                                    />
+                                  )}
+                                  {account.status === "FROZEN" && (
+                                    <ActionBtn
+                                      label="Unfreeze"
+                                      color="green"
+                                      onClick={() => handleUnfreezeAccount(account.account_id)}
+                                    />
+                                  )}
+                                  {account.status === "CLOSURE_PENDING" && (
+                                    <ActionBtn
+                                      label={closureActionLoading === account.account_id ? "Processing..." : "Approve Closure"}
+                                      color="red"
+                                      onClick={() => handleApproveClosure(account.account_id)}
+                                    />
+                                  )}
+                                  {!["ACTIVE", "FROZEN", "CLOSURE_PENDING"].includes(account.status) && (
+                                    <span className="text-xs text-gray-400">—</span>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
           </div>
         </div>
       </main>
@@ -1030,6 +1240,65 @@ export default function AdminDashboard() {
           showMsg={showMsg}
         />
       )}
+
+      {/* ── FREEZE ACCOUNT MODAL ── */}
+      {freezeModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 bg-orange-100 rounded-full flex items-center justify-center">
+                <AlertCircle className="w-5 h-5 text-orange-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Freeze Account</h3>
+                <p className="text-sm text-gray-500">{freezeModal.account.account_number}</p>
+              </div>
+            </div>
+
+            <div className="bg-gray-50 rounded-lg p-3 mb-4 text-sm space-y-1">
+              <p><span className="text-gray-500">Customer:</span> <span className="font-medium">{freezeModal.account.customer_name}</span></p>
+              <p><span className="text-gray-500">Type:</span> <span className="font-medium">{freezeModal.account.account_type}</span></p>
+              <p><span className="text-gray-500">Balance:</span> <span className="font-medium">{formatCurrency(freezeModal.account.balance)}</span></p>
+            </div>
+
+            <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 mb-4">
+              <p className="text-xs text-orange-800 font-medium mb-1">What freezing does:</p>
+              <p className="text-xs text-orange-700">Blocks all withdrawals and transfers on this account. The customer will be notified. Balance is preserved. You can unfreeze at any time.</p>
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Reason for freezing <span className="text-red-500">*</span>
+              </label>
+              <textarea
+                rows={3}
+                value={freezeReason}
+                onChange={e => setFreezeReason(e.target.value)}
+                placeholder="e.g. Suspicious transaction activity, AML hold, customer request..."
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm resize-none focus:ring-2 focus:ring-orange-400"
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={handleFreezeAccount}
+                disabled={freezeLoading}
+                className="flex-1 bg-orange-600 text-white py-2 rounded-lg hover:bg-orange-700 text-sm font-medium disabled:opacity-60"
+              >
+                {freezeLoading ? "Freezing..." : "Confirm Freeze"}
+              </button>
+              <button
+                onClick={() => { setFreezeModal(null); setFreezeReason(""); }}
+                disabled={freezeLoading}
+                className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 text-sm"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

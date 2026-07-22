@@ -7,6 +7,7 @@ import { api } from "../services/api";
 import NotificationBell from "../components/NotificationBell";
 import ProfileModal from "../components/ProfileModal";
 import { navigate } from "../components/Router";
+import { usePolling } from "../hooks/usePolling";
 import {
   Users, UserCheck, Building, RefreshCw, LogOut,
   DollarSign, CreditCard, FileText, Eye, Search,
@@ -124,6 +125,17 @@ export default function UserDashboard() {
   const [loans, setLoans] = useState<Loan[]>([]);
   const [depositData, setDepositData] = useState({ accountId: "", amount: "", description: "" });
 
+
+  const [loanApproveModal, setLoanApproveModal] = useState<Loan | null>(null);
+  const [loanApproveData, setLoanApproveData] = useState({ amount: "", months: "" });
+
+  const [loanRejectModal, setLoanRejectModal] = useState<{ loanId: number } | null>(null);
+  const [loanRejectReason, setLoanRejectReason] = useState("");
+
+  const [accountRejectModal, setAccountRejectModal] = useState<{ accountId: number } | null>(null);
+  const [accountRejectReason, setAccountRejectReason] = useState("");
+
+
   // Repayment schedule per loan
   const [repaymentSchedules, setRepaymentSchedules] = useState<Record<number, Repayment[]>>({});
   const [loadingScheduleId, setLoadingScheduleId] = useState<number | null>(null);
@@ -154,7 +166,36 @@ export default function UserDashboard() {
     }
   };
 
+
+
+  const silentRefreshAll = async () => {
+    // Silently refresh all data — no loading spinner
+    try {
+      const [custRes, accRes, loanRes] = await Promise.all([
+        userService.getAllCustomers().catch(() => []),
+        accountService.getAll().catch(() => []),
+        loanService.getAllLoans().catch(() => []),
+      ]);
+
+      const custList = Array.isArray(custRes) ? custRes : (custRes as any).customers || [];
+      const accList = Array.isArray(accRes) ? accRes : (accRes as any).accounts || [];
+      const loanList = Array.isArray(loanRes) ? loanRes : (loanRes as any).loans || [];
+
+      setCustomers(custList);
+      setAccounts(accList);
+      setLoans(loanList);
+    } catch (_) { }
+  };
+
   useEffect(() => { fetchAll(); }, []);
+
+
+  const anyModalOpenStaff = showProfileModal || !!loanApproveModal || !!loanRejectModal || !!accountRejectModal // add any other modals you have
+
+  usePolling(silentRefreshAll, {
+    intervalMs: 5000,
+    paused: anyModalOpenStaff,
+  });
 
   // ----------------------------------------------------------------
   //  FILTERED DATA
@@ -228,11 +269,13 @@ export default function UserDashboard() {
     } catch (err: any) { showMsg("error", err.message || "Failed."); }
   };
 
-  const handleRejectAccount = async (accountId: number) => {
-    const remarks = prompt("Rejection reason (optional):");
+  const handleRejectAccount = async () => {
+    if (!accountRejectModal) return;
     try {
-      await accountService.reject(accountId, remarks || undefined);
+      await accountService.reject(accountRejectModal.accountId, accountRejectReason || undefined);
       showMsg("success", "Account rejected.");
+      setAccountRejectModal(null);
+      setAccountRejectReason("");
       fetchAll();
     } catch (err: any) { showMsg("error", err.message || "Failed."); }
   };
@@ -240,27 +283,32 @@ export default function UserDashboard() {
   // ----------------------------------------------------------------
   //  LOAN ACTIONS
   // ----------------------------------------------------------------
-  const handleApproveLoan = async (loanId: number) => {
-    const approved_amount = prompt("Enter approved amount (PKR):");
-    if (!approved_amount) return;
-    const duration_months = prompt("Enter duration in months:");
-    if (!duration_months) return;
+  const handleApproveLoan = async () => {
+    if (!loanApproveModal) return;
+    const amount = parseFloat(loanApproveData.amount);
+    const months = parseInt(loanApproveData.months);
+    if (!amount || amount <= 0) return showMsg("error", "Enter a valid amount.");
+    if (!months || months <= 0) return showMsg("error", "Enter valid duration.");
     try {
-      await loanService.staffApproveLoan(loanId, {
-        approved_amount: parseFloat(approved_amount),
-        duration_months: parseInt(duration_months),
+      await loanService.staffApproveLoan(loanApproveModal.loan_id, {
+        approved_amount: amount,
+        duration_months: months,
       });
       showMsg("success", "Loan approved at staff level. Awaiting admin approval.");
+      setLoanApproveModal(null);
+      setLoanApproveData({ amount: "", months: "" });
       fetchAll();
     } catch (err: any) { showMsg("error", err.message || "Failed."); }
   };
 
-  const handleRejectLoan = async (loanId: number) => {
-    const reason = prompt("Enter rejection reason (required):");
-    if (!reason?.trim()) return showMsg("error", "Rejection reason is required.");
+  const handleRejectLoan = async () => {
+    if (!loanRejectModal) return;
+    if (!loanRejectReason.trim()) return showMsg("error", "Rejection reason is required.");
     try {
-      await loanService.staffRejectLoan(loanId, reason);
+      await loanService.staffRejectLoan(loanRejectModal.loanId, loanRejectReason);
       showMsg("success", "Loan rejected.");
+      setLoanRejectModal(null);
+      setLoanRejectReason("");
       fetchAll();
     } catch (err: any) { showMsg("error", err.message || "Failed."); }
   };
@@ -520,7 +568,7 @@ export default function UserDashboard() {
                                 {a.status === "PENDING" && (
                                   <>
                                     <Btn label="Approve" color="green" onClick={() => handleApproveAccount(a.account_id)} />
-                                    <Btn label="Reject" color="red" onClick={() => handleRejectAccount(a.account_id)} />
+                                    <Btn label="Reject" color="red" onClick={() => { setAccountRejectModal({ accountId: a.account_id }); setAccountRejectReason(""); }} />
                                   </>
                                 )}
                                 {a.status === "ACTIVE" && (
@@ -606,8 +654,8 @@ export default function UserDashboard() {
                             <div className="flex flex-col items-end gap-2 ml-4">
                               {loan.status === "PENDING" && !loan.staff_approval_status && (
                                 <div className="flex gap-2">
-                                  <Btn label="Approve" color="green" onClick={() => handleApproveLoan(loan.loan_id)} />
-                                  <Btn label="Reject" color="red" onClick={() => handleRejectLoan(loan.loan_id)} />
+                                  <Btn label="Approve" color="green" onClick={() => { setLoanApproveModal(loan); setLoanApproveData({ amount: "", months: "" }); }} />
+                                  <Btn label="Reject" color="red" onClick={() => { setLoanRejectModal({ loanId: loan.loan_id }); setLoanRejectReason(""); }} />
                                 </div>
                               )}
                               {showAwaitingAdmin && (
@@ -779,6 +827,122 @@ export default function UserDashboard() {
 
           </div>
         </div>
+
+        {/* ── LOAN APPROVE MODAL ── */}
+        {loanApproveModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 p-6">
+              <h3 className="text-lg font-bold text-gray-900 mb-1">Approve Loan</h3>
+              <p className="text-sm text-gray-500 mb-4">Review the application then enter your approved terms.</p>
+
+              {/* Loan details summary */}
+              <div className="bg-gray-50 rounded-xl p-4 mb-5 grid grid-cols-2 gap-3">
+                <Info label="Customer" value={loanApproveModal.customer_name} />
+                <Info label="Loan Type" value={loanApproveModal.loan_type} />
+                <Info label="Applied Amount" value={formatCurrency(loanApproveModal.loan_amount)} />
+                <Info label="Requested Duration" value={`${loanApproveModal.duration_months} months`} />
+                <Info label="Interest Rate" value={`${loanApproveModal.interest_rate}%`} />
+                <Info label="Applied On" value={formatDate(loanApproveModal.created_at)} />
+              </div>
+
+              {/* Input fields */}
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Approved Amount (PKR)
+                    <span className="text-gray-400 font-normal ml-1">— applied for {formatCurrency(loanApproveModal.loan_amount)}</span>
+                  </label>
+                  <input
+                    type="number" min="1" autoFocus
+                    value={loanApproveData.amount}
+                    onChange={e => setLoanApproveData(p => ({ ...p, amount: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                    placeholder={`Max: ${formatCurrency(loanApproveModal.loan_amount)}`}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Duration (months)
+                    <span className="text-gray-400 font-normal ml-1">— requested {loanApproveModal.duration_months} months</span>
+                  </label>
+                  <input
+                    type="number" min="1"
+                    value={loanApproveData.months}
+                    onChange={e => setLoanApproveData(p => ({ ...p, months: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                    placeholder={`e.g. ${loanApproveModal.duration_months}`}
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-3 mt-6">
+                <button onClick={handleApproveLoan}
+                  className="flex-1 bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 text-sm font-medium">
+                  Confirm Approval
+                </button>
+                <button onClick={() => setLoanApproveModal(null)}
+                  className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 text-sm">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── LOAN REJECT MODAL ── */}
+        {loanRejectModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6">
+              <h3 className="text-lg font-bold text-gray-900 mb-1">Reject Loan</h3>
+              <p className="text-sm text-gray-500 mb-5">Provide a reason — the customer will see this.</p>
+              <textarea
+                autoFocus rows={3}
+                value={loanRejectReason}
+                onChange={e => setLoanRejectReason(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500 resize-none"
+                placeholder="e.g. Insufficient income documentation..."
+              />
+              <div className="flex gap-3 mt-4">
+                <button onClick={handleRejectLoan}
+                  className="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 text-sm font-medium">
+                  Confirm Rejection
+                </button>
+                <button onClick={() => setLoanRejectModal(null)}
+                  className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 text-sm">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── ACCOUNT REJECT MODAL ── */}
+        {accountRejectModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6">
+              <h3 className="text-lg font-bold text-gray-900 mb-1">Reject Account</h3>
+              <p className="text-sm text-gray-500 mb-5">Reason is optional but helps the customer.</p>
+              <textarea
+                autoFocus rows={3}
+                value={accountRejectReason}
+                onChange={e => setAccountRejectReason(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500 resize-none"
+                placeholder="e.g. Invalid documents submitted..."
+              />
+              <div className="flex gap-3 mt-4">
+                <button onClick={handleRejectAccount}
+                  className="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 text-sm font-medium">
+                  Confirm Rejection
+                </button>
+                <button onClick={() => setAccountRejectModal(null)}
+                  className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 text-sm">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
       </main>
 
       <ProfileModal isOpen={showProfileModal} onClose={() => setShowProfileModal(false)}

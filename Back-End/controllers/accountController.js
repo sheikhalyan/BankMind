@@ -154,14 +154,16 @@ const getAllAccounts = async (req, res) => {
     const request = pool.request();
 
     let query = `
-      SELECT
-        a.account_id, a.account_number, a.account_type,
-        a.balance, a.status, a.opened_date,
-        c.customer_id, c.full_name AS customer_name,
-        c.email AS customer_email
-      FROM  Accounts  a
-      JOIN  Customers c ON c.customer_id = a.customer_id
-    `;
+  SELECT
+    a.account_id, a.account_number, a.account_type,
+    a.balance, a.status, a.opened_date, a.closed_date,
+    c.customer_id, c.full_name AS customer_name,
+    c.email AS customer_email,
+    u.full_name AS assigned_staff_name
+  FROM  Accounts  a
+  JOIN  Customers c ON c.customer_id = a.customer_id
+  LEFT JOIN Users u ON u.user_id = c.assigned_staff_id
+`;
 
     if (role === 'STAFF') {
       query += ` WHERE c.assigned_staff_id = @staff_id`;
@@ -415,6 +417,379 @@ const getUserAssociatedAccounts = async (req, res) => {
   }
 };
 
+
+// ================================================================
+//  CUSTOMER — REQUEST ACCOUNT CLOSURE
+//  POST /api/accounts/:accountId/request-closure
+// ================================================================
+const requestAccountClosure = async (req, res) => {
+  const { accountId } = req.params;
+  const customerId = req.user.customerId;
+
+  try {
+    const pool = await getPool();
+    const AccountModel = require('../models/Accountmodel');
+
+    // 1. Verify ownership
+    const account = await AccountModel.findById(accountId);
+    if (!account)
+      return res.status(404).json({ message: 'Account not found.' });
+    if (account.customer_id !== customerId)
+      return res.status(403).json({ message: 'This account does not belong to you.' });
+
+    // 2. Specific status checks — clear messages for each case
+    if (account.status === 'CLOSURE_PENDING')
+      return res.status(400).json({ message: 'A closure request is already pending for this account. Please wait for admin review.' });
+    if (account.status === 'CLOSED')
+      return res.status(400).json({ message: 'This account is already closed.' });
+    if (account.status === 'FROZEN')
+      return res.status(400).json({ message: 'This account is frozen. Contact support before requesting closure.' });
+    if (account.status !== 'ACTIVE')
+      return res.status(400).json({ message: `Account cannot be closed. Current status: ${account.status}.` });
+
+    // 3. Check for active loans
+    const hasLoans = await AccountModel.hasActiveLoans(accountId);
+    if (hasLoans)
+      return res.status(400).json({ message: 'Cannot close account. You have an active loan on this account. Please repay your loan fully before closing.' });
+
+    // 4. Atomic update — only update if still ACTIVE (race condition protection)
+    const updateResult = await pool.request()
+      .input('account_id', sql.Int, accountId)
+      .query(`
+        UPDATE Accounts
+        SET    status = 'CLOSURE_PENDING'
+        WHERE  account_id = @account_id
+          AND  status = 'ACTIVE'   -- ← only succeeds if still ACTIVE
+      `);
+
+    // If rowsAffected = 0, someone else already changed the status
+    if (updateResult.rowsAffected[0] === 0)
+      return res.status(409).json({ message: 'A closure request was already submitted for this account. Please refresh and try again.' });
+
+    // 5. Notify staff and admins
+    const customer = await CustomerModel.findById(customerId);
+    await Promise.all([
+      notifyStaff({
+        customer_id: customerId,
+        type: 'ACCOUNT_CLOSURE_REQUESTED',
+        message: `Customer "${customer.full_name}" has requested closure of ${account.account_type} account ${account.account_number}.`,
+        related_id: Number(accountId),
+        related_type: 'ACCOUNT',
+      }),
+      notifyAdmins({
+        type: 'ACCOUNT_CLOSURE_REQUESTED',
+        message: `Customer "${customer.full_name}" has requested closure of ${account.account_type} account ${account.account_number}.`,
+        related_id: Number(accountId),
+        related_type: 'ACCOUNT',
+      }),
+    ]);
+
+    return res.json({ message: 'Account closure request submitted. Awaiting admin approval.' });
+
+  } catch (err) {
+    console.error('[requestAccountClosure]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// ================================================================
+//  STAFF/ADMIN — GET ALL CLOSURE PENDING ACCOUNTS
+//  GET /api/accounts/closure-pending
+// ================================================================
+const getClosurePendingAccounts = async (req, res) => {
+  try {
+    const pool = await getPool();
+    const result = await pool.request()
+      .query(`
+        SELECT
+          a.account_id, a.account_number, a.account_type,
+          a.balance, a.status, a.opened_date,
+          c.customer_id, c.full_name AS customer_name,
+          c.email AS customer_email
+        FROM  Accounts a
+        JOIN  Customers c ON c.customer_id = a.customer_id
+        WHERE a.status = 'CLOSURE_PENDING'
+        ORDER BY a.opened_date DESC
+      `);
+
+    return res.json(result.recordset);
+
+  } catch (err) {
+    console.error('[getClosurePendingAccounts]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// ================================================================
+//  STAFF/ADMIN — APPROVE ACCOUNT CLOSURE
+//  PUT /api/accounts/:accountId/approve-closure
+// ================================================================
+const approveAccountClosure = async (req, res) => {
+  const { accountId } = req.params;
+  const approverId = req.user.userId;
+  const approverRole = req.user.role.toUpperCase();
+
+  try {
+    const pool = await getPool();
+    const AccountModel = require('../models/Accountmodel');
+
+    // 1. Fetch account
+    const account = await AccountModel.findById(accountId);
+    if (!account)
+      return res.status(404).json({ message: 'Account not found.' });
+    if (account.status !== 'CLOSURE_PENDING')
+      return res.status(400).json({ message: `Account is not pending closure. Current status: ${account.status}` });
+
+    // 2. Double-check no active loans (safety net)
+    const hasLoans = await AccountModel.hasActiveLoans(accountId);
+    if (hasLoans)
+      return res.status(400).json({
+        message: 'Cannot close account. Customer still has an active loan. Ask customer to repay fully first.',
+      });
+
+    // 3. Handle balance settlement
+    const balance = parseFloat(account.balance);
+    const secondAccount = await AccountModel.getSecondAccount(account.customer_id, accountId);
+
+    // Begin DB transaction
+    const transaction = pool.transaction();
+    await transaction.begin();
+
+    try {
+      const request = transaction.request();
+
+      if (balance > 0) {
+        if (secondAccount) {
+          // Transfer balance to second account
+          await request
+            .input('from_account_id', sql.Int, account.account_id)
+            .input('to_account_id', sql.Int, secondAccount.account_id)
+            .input('balance', sql.Decimal(15, 2), balance)
+            .query(`
+              -- Deduct from closing account
+              UPDATE Accounts SET balance = 0 WHERE account_id = @from_account_id;
+
+              -- Credit to second account
+              UPDATE Accounts SET balance = balance + @balance WHERE account_id = @to_account_id;
+
+              -- Record transfer transaction
+              INSERT INTO Transactions
+                (from_account_id, to_account_id, transaction_type, amount, status, description)
+              VALUES
+                (@from_account_id, @to_account_id, 'INTERNAL_TRANSFER', @balance, 'COMPLETED',
+                 'Account closure — balance transferred to alternate account');
+            `);
+        } else {
+          // No second account — final cash withdrawal
+          await request
+            .input('from_account_id2', sql.Int, account.account_id)
+            .input('balance2', sql.Decimal(15, 2), balance)
+            .query(`
+              -- Zero out balance
+              UPDATE Accounts SET balance = 0 WHERE account_id = @from_account_id2;
+
+              -- Record withdrawal transaction
+              INSERT INTO Transactions
+                (from_account_id, to_account_id, transaction_type, amount, status, description)
+              VALUES
+                (@from_account_id2, NULL, 'CLOSURE_WITHDRAWAL', @balance2, 'COMPLETED',
+                 'Account closure — final cash withdrawal');
+            `);
+        }
+      }
+
+      // 4. Close the account
+      const request2 = transaction.request();
+      await request2
+        .input('account_id', sql.Int, accountId)
+        .input('closed_date', sql.DateTime, new Date())
+        .query(`
+          UPDATE Accounts
+          SET status = 'CLOSED', closed_date = @closed_date
+          WHERE account_id = @account_id
+        `);
+
+      // 5. Record in Account_Approvals
+      const request3 = transaction.request();
+      await request3
+        .input('account_id2', sql.Int, accountId)
+        .input('approver_id', sql.Int, approverId)
+        .input('approver_role', sql.NVarChar, approverRole)
+        .query(`
+          INSERT INTO Account_Approvals
+            (account_id, approver_id, approver_role, status, remarks)
+          VALUES
+            (@account_id2, @approver_id, @approver_role, 'CLOSED',
+             'Account closure approved and processed.');
+        `);
+
+      await transaction.commit();
+
+    } catch (innerErr) {
+      await transaction.rollback();
+      throw innerErr;
+    }
+
+    // 6. Notify customer
+    const balanceMsg = balance === 0
+      ? 'Your account had zero balance.'
+      : secondAccount
+        ? `PKR ${balance.toLocaleString()} has been transferred to your ${secondAccount.account_type} account (${secondAccount.account_number}).`
+        : `PKR ${balance.toLocaleString()} has been processed as a final cash withdrawal.`;
+
+    await notifyCustomer({
+      customer_id: account.customer_id,
+      type: 'ACCOUNT_CLOSED',
+      message: `Your ${account.account_type} account (${account.account_number}) has been closed. ${balanceMsg}`,
+      related_id: Number(accountId),
+      related_type: 'ACCOUNT',
+    });
+
+    return res.json({
+      message: 'Account closed successfully.',
+      balance_settled: balance,
+      settlement_method: balance === 0 ? 'NO_BALANCE' : secondAccount ? 'INTERNAL_TRANSFER' : 'CASH_WITHDRAWAL',
+      transferred_to: secondAccount?.account_number || null,
+    });
+
+  } catch (err) {
+    console.error('[approveAccountClosure]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// ================================================================
+//  ADMIN — FREEZE ACCOUNT
+//  PUT /api/accounts/:accountId/freeze
+// ================================================================
+const freezeAccount = async (req, res) => {
+  const { accountId } = req.params;
+  const { reason } = req.body;
+  const adminId = req.user.userId;
+
+  if (!reason?.trim())
+    return res.status(400).json({ message: 'Freeze reason is required.' });
+
+  try {
+    const pool = await getPool();
+
+    const result = await pool.request()
+      .input('account_id', sql.Int, accountId)
+      .query(`
+        SELECT a.account_id, a.account_number, a.account_type,
+               a.status, a.customer_id, c.full_name AS customer_name
+        FROM   Accounts a
+        JOIN   Customers c ON c.customer_id = a.customer_id
+        WHERE  a.account_id = @account_id
+      `);
+
+    const account = result.recordset[0];
+    if (!account)
+      return res.status(404).json({ message: 'Account not found.' });
+    if (account.status !== 'ACTIVE')
+      return res.status(400).json({ message: `Cannot freeze account. Current status: ${account.status}` });
+
+    await pool.request()
+      .input('account_id', sql.Int, accountId)
+      .query(`UPDATE Accounts SET status = 'FROZEN' WHERE account_id = @account_id`);
+
+    // Record in Account_Approvals for audit trail
+    await pool.request()
+      .input('account_id', sql.Int, accountId)
+      .input('approver_id', sql.Int, adminId)
+      .input('reason', sql.NVarChar, reason)
+      .query(`
+        INSERT INTO Account_Approvals (account_id, approver_id, approver_role, status, remarks)
+        VALUES (@account_id, @approver_id, 'ADMIN', 'FROZEN', @reason)
+      `);
+
+    await notifyCustomer({
+      customer_id: account.customer_id,
+      type: 'ACCOUNT_FROZEN',
+      message: `Your ${account.account_type} account (${account.account_number}) has been frozen. Reason: ${reason}. Please contact support.`,
+      related_id: Number(accountId),
+      related_type: 'ACCOUNT',
+    });
+
+    await notifyAdmins({
+      type: 'ACCOUNT_FROZEN',
+      message: `Account ${account.account_number} (${account.customer_name}) has been frozen by Admin #${adminId}. Reason: ${reason}`,
+      related_id: Number(accountId),
+      related_type: 'ACCOUNT',
+    });
+
+    return res.json({ message: 'Account frozen successfully.' });
+
+  } catch (err) {
+    console.error('[freezeAccount]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// ================================================================
+//  ADMIN — UNFREEZE ACCOUNT
+//  PUT /api/accounts/:accountId/unfreeze
+// ================================================================
+const unfreezeAccount = async (req, res) => {
+  const { accountId } = req.params;
+  const adminId = req.user.userId;
+
+  try {
+    const pool = await getPool();
+
+    const result = await pool.request()
+      .input('account_id', sql.Int, accountId)
+      .query(`
+        SELECT a.account_id, a.account_number, a.account_type,
+               a.status, a.customer_id, c.full_name AS customer_name
+        FROM   Accounts a
+        JOIN   Customers c ON c.customer_id = a.customer_id
+        WHERE  a.account_id = @account_id
+      `);
+
+    const account = result.recordset[0];
+    if (!account)
+      return res.status(404).json({ message: 'Account not found.' });
+    if (account.status !== 'FROZEN')
+      return res.status(400).json({ message: `Account is not frozen. Current status: ${account.status}` });
+
+    await pool.request()
+      .input('account_id', sql.Int, accountId)
+      .query(`UPDATE Accounts SET status = 'ACTIVE' WHERE account_id = @account_id`);
+
+    // Record in Account_Approvals for audit trail
+    await pool.request()
+      .input('account_id', sql.Int, accountId)
+      .input('approver_id', sql.Int, adminId)
+      .query(`
+        INSERT INTO Account_Approvals (account_id, approver_id, approver_role, status, remarks)
+        VALUES (@account_id, @approver_id, 'ADMIN', 'ACTIVE', 'Account unfrozen by admin.')
+      `);
+
+    await notifyCustomer({
+      customer_id: account.customer_id,
+      type: 'ACCOUNT_UNFROZEN',
+      message: `Your ${account.account_type} account (${account.account_number}) has been unfrozen and is now active.`,
+      related_id: Number(accountId),
+      related_type: 'ACCOUNT',
+    });
+
+    await notifyAdmins({
+      type: 'ACCOUNT_UNFROZEN',
+      message: `Account ${account.account_number} (${account.customer_name}) has been unfrozen by Admin #${adminId}.`,
+      related_id: Number(accountId),
+      related_type: 'ACCOUNT',
+    });
+
+    return res.json({ message: 'Account unfrozen successfully.' });
+
+  } catch (err) {
+    console.error('[unfreezeAccount]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+
 module.exports = {
   createAccount,
   getPendingAccounts,
@@ -424,4 +799,9 @@ module.exports = {
   getMyAccounts,
   getAccountsByCustomer,
   getUserAssociatedAccounts,
+  requestAccountClosure,
+  getClosurePendingAccounts,
+  approveAccountClosure,
+  freezeAccount,
+  unfreezeAccount
 };
