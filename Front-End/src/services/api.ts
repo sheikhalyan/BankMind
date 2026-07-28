@@ -41,8 +41,12 @@ export const api = {
     let url = `${API_BASE_URL}${endpoint}`;
 
     if (params) {
-      const queryString = new URLSearchParams(params).toString();
-      url += `?${queryString}`;
+      const cleaned = Object.fromEntries(
+        Object.entries(params).filter(([, v]) => v !== undefined && v !== null)
+      );
+      if (Object.keys(cleaned).length > 0) {
+        url += `?${new URLSearchParams(cleaned).toString()}`;
+      }
     }
 
     const response = await fetch(url, { headers: authHeaders() });

@@ -1,6 +1,8 @@
 const { getPool, sql } = require('../config/db');
 const UserModel = require('../models/Usermodel');
 const CustomerModel = require('../models/Customermodel');
+const AccountModel = require('../models/Accountmodel');
+const FraudLogModel = require('../models/Fraudlogmodel');
 const {
   notifyUser,
   notifyAdmins,
@@ -679,6 +681,114 @@ const getDashboardStats = async (req, res) => {
 };
 
 
+// ================================================================
+//  FRAUD MANAGEMENT
+// ================================================================
+
+/**
+ * GET /api/admin/fraud
+ * Unresolved fraud flags — the dashboard's default/live view
+ */
+const getUnresolvedFraud = async (req, res) => {
+  try {
+    const logs = await FraudLogModel.getUnresolved();
+    return res.json(logs);
+  } catch (err) {
+    console.error('[getUnresolvedFraud]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * GET /api/admin/fraud/all
+ * Every fraud flag, resolved or not
+ */
+const getAllFraud = async (req, res) => {
+  try {
+    const logs = await FraudLogModel.getAll();
+    return res.json(logs);
+  } catch (err) {
+    console.error('[getAllFraud]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * PUT /api/admin/fraud/:fraudId/resolve
+ * Body: { action_taken: 'CLEARED' | 'BLOCKED' }
+ *
+ * CLEARED  → false alarm, just marks the flag resolved.
+ * BLOCKED  → freezes the account tied to the transaction.
+ *            If that's the customer's ONLY account, also suspends the customer.
+ *            If the customer has more than one account, only that account is frozen.
+ */
+const resolveFraud = async (req, res) => {
+  const { fraudId } = req.params;
+  const { action_taken } = req.body;
+  const reviewed_by = req.user.userId; // never trust a client-supplied reviewer id
+
+  if (!['CLEARED', 'BLOCKED'].includes(action_taken)) {
+    return res.status(400).json({ message: "action_taken must be 'CLEARED' or 'BLOCKED'." });
+  }
+
+  try {
+    const fraud = await FraudLogModel.findById(fraudId);
+    if (!fraud) return res.status(404).json({ message: 'Fraud flag not found.' });
+    if (fraud.resolved_at) return res.status(400).json({ message: 'This fraud flag has already been resolved.' });
+
+    // The account "at fault" for the flagged transaction: from_account_id covers
+    // withdrawals/transfers, falls back to to_account_id for deposits.
+    const subjectAccountId = fraud.from_account_id || fraud.to_account_id;
+    const subjectAccount = subjectAccountId ? await AccountModel.findById(subjectAccountId) : null;
+
+    await FraudLogModel.resolve({ fraud_id: fraudId, reviewed_by, action_taken });
+
+    if (action_taken === 'BLOCKED') {
+      if (!subjectAccount) {
+        // No account could be resolved from the transaction — flag is still marked
+        // resolved above, but there's nothing to freeze/suspend.
+        return res.json({ message: 'Fraud confirmed, but no account could be identified to freeze.' });
+      }
+
+      const customerAccounts = await AccountModel.getByCustomer(subjectAccount.customer_id);
+      const freezeOnly = customerAccounts.length > 1;
+
+      await AccountModel.updateStatus(subjectAccount.account_id, 'FROZEN');
+      if (!freezeOnly) {
+        await CustomerModel.updateStatus(subjectAccount.customer_id, 'SUSPENDED');
+      }
+
+      await notifyCustomer({
+        customer_id: subjectAccount.customer_id,
+        type: 'FRAUD_BLOCKED',
+        message: freezeOnly
+          ? `Account ${subjectAccount.account_number} has been frozen due to suspicious activity. Please contact support.`
+          : `Your account has been frozen and your profile suspended due to suspicious activity. Please contact support immediately.`,
+      });
+
+      return res.json({
+        message: freezeOnly
+          ? 'Fraud confirmed. Account frozen.'
+          : 'Fraud confirmed. Account frozen and customer suspended (only account on file).',
+      });
+    }
+
+    // CLEARED — false alarm
+    if (subjectAccount) {
+      await notifyCustomer({
+        customer_id: subjectAccount.customer_id,
+        type: 'FRAUD_CLEARED',
+        message: 'A recent transaction flagged for review has been cleared — no action needed.',
+      });
+    }
+    return res.json({ message: 'Fraud flag cleared.' });
+  } catch (err) {
+    console.error('[resolveFraud]', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+
 module.exports = {
   // Staff
   getAllStaff,
@@ -703,4 +813,8 @@ module.exports = {
   toggleLoanPolicy,
   // Stats
   getDashboardStats,
+  // Fraud
+  getUnresolvedFraud,
+  getAllFraud,
+  resolveFraud,
 };

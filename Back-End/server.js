@@ -38,11 +38,12 @@ app.use('/api/transactions', require('./routes/transactionRoutes'));
 app.use('/api/loans', require('./routes/loanRoutes'));
 app.use('/api/loan-repayments', require('./routes/Loanrepaymentroutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
+app.use('/api/support', require('./routes/supportticketRoutes'));
 
 // Uncomment as you build these:
 // app.use('/api/fraud',            require('./routes/fraudRoutes'));
 // app.use('/api/chat',             require('./routes/aiChatRoutes'));
-// app.use('/api/support',          require('./routes/supportTicketRoutes'));
+
 
 /* -------------------- 404 HANDLER -------------------- */
 app.use((req, res) => {

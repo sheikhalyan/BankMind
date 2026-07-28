@@ -12,8 +12,10 @@ import {
   Users, UserCheck, Building, RefreshCw, LogOut,
   DollarSign, CreditCard, FileText, Eye, Search,
   Clock, AlertCircle, CheckCircle, XCircle, User,
-  Calendar, ChevronDown, ChevronUp,
+  Calendar, ChevronDown, ChevronUp, MessageSquare, Send, X,
+  TrendingUp, Shield,
 } from "lucide-react";
+import { supportService } from "../services/support";
 
 // ================================================================
 //  TYPES
@@ -41,7 +43,9 @@ interface Account {
   balance: number;
   status: string;
   opened_date: string;
+  closed_date: string | null;
   customer_name: string;
+  customer_email: string;
 }
 
 interface Loan {
@@ -51,11 +55,15 @@ interface Loan {
   loan_type: string;
   loan_amount: number;
   approved_amount: number | null;
+  disbursed_amount: number | null;
+  disbursed_at: string | null;
   duration_months: number;
   interest_rate: number;
   status: string;
   auto_deduct: boolean;
   created_at: string;
+  start_date: string | null;
+  end_date: string | null;
   staff_approval_status: string | null;
   staff_approval_remarks: string | null;
   admin_approval_status: string | null;
@@ -71,12 +79,46 @@ interface Repayment {
   status: "PENDING" | "PAID" | "OVERDUE" | "FAILED";
 }
 
-type TabType = "customers" | "accounts" | "loans" | "deposit";
-type LoanFilter = "ALL" | "PENDING" | "ACTIVE" | "REJECTED";
+interface Transaction {
+  transaction_id: number;
+  transaction_type: string;
+  amount: number;
+  direction: "CREDIT" | "DEBIT";
+  description: string;
+  transaction_time: string;
+  is_fraud: number;
+}
+
+interface TicketReply {
+  reply_id: number;
+  sender_type: "CUSTOMER" | "STAFF" | "ADMIN";
+  sender_name?: string;
+  message: string;
+  created_at: string;
+}
+
+interface SupportTicket {
+  ticket_id: number;
+  customer_name: string;
+  assigned_to: number | null;
+  assigned_to_name: string | null;
+  subject: string;
+  description: string;
+  category: string;
+  status: "OPEN" | "IN_PROGRESS" | "RESOLVED" | "CLOSED";
+  priority: "LOW" | "MEDIUM" | "HIGH";
+  created_at: string;
+  replies?: TicketReply[];
+}
+
+type TabType = "customers" | "accounts" | "loans" | "deposit" | "tickets";
+type LoanFilter = "ALL" | "PENDING" | "ACTIVE" | "REJECTED" | "CLOSED";
 type CustomerFilter = "ALL" | "PENDING" | "ACTIVE" | "REJECTED" | "MY_CUSTOMERS";
+type AccountFilter = "ALL" | "PENDING" | "ACTIVE" | "FROZEN" | "CLOSURE_PENDING" | "CLOSED";
+type TicketStatusFilter = "ALL" | "OPEN" | "IN_PROGRESS" | "RESOLVED" | "CLOSED";
 
 // ================================================================
-//  HELPERS
+//  HELPER COMPONENTS (defined before main component)
 // ================================================================
 const formatDate = (d: string | null) => {
   if (!d) return "N/A";
@@ -95,6 +137,10 @@ const StatusBadge = ({ status }: { status: string }) => {
     REJECTED: { bg: "bg-red-100", text: "text-red-800", icon: <XCircle className="w-3 h-3" /> },
     SUSPENDED: { bg: "bg-orange-100", text: "text-orange-800", icon: <AlertCircle className="w-3 h-3" /> },
     APPROVED: { bg: "bg-green-100", text: "text-green-800", icon: <CheckCircle className="w-3 h-3" /> },
+    FROZEN: { bg: "bg-blue-100", text: "text-blue-800", icon: <Shield className="w-3 h-3" /> },
+    CLOSURE_PENDING: { bg: "bg-orange-100", text: "text-orange-800", icon: <Clock className="w-3 h-3" /> },
+    CLOSED: { bg: "bg-gray-100", text: "text-gray-800", icon: <XCircle className="w-3 h-3" /> },
+    DEFAULTED: { bg: "bg-red-200", text: "text-red-900", icon: <AlertCircle className="w-3 h-3" /> },
   };
   const style = map[s] || { bg: "bg-gray-100", text: "text-gray-800", icon: <AlertCircle className="w-3 h-3" /> };
   return (
@@ -104,12 +150,75 @@ const StatusBadge = ({ status }: { status: string }) => {
   );
 };
 
+const StatCard = ({ label, value, icon }: any) => (
+  <div className="bg-white rounded-lg shadow p-4">
+    <div className="flex items-center justify-between">
+      <div>
+        <p className="text-xs text-gray-500 mb-1">{label}</p>
+        <p className="text-xl font-bold text-gray-900">{value}</p>
+      </div>
+      {icon}
+    </div>
+  </div>
+);
+
+const SearchBar = ({ value, onChange, placeholder }: any) => (
+  <div className="mb-4 relative">
+    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-4 h-4" />
+    <input type="text" value={value} onChange={e => onChange(e.target.value)}
+      placeholder={placeholder}
+      className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" />
+  </div>
+);
+
+const FilterBtn = ({ label, active, onClick }: any) => (
+  <button onClick={onClick}
+    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${active ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+    {label}
+  </button>
+);
+
+const Btn = ({ label, color, onClick, disabled }: any) => {
+  const colors: Record<string, string> = {
+    green: "bg-green-50 text-green-700 hover:bg-green-100",
+    red: "bg-red-50 text-red-700 hover:bg-red-100",
+    gray: "bg-gray-100 text-gray-700 hover:bg-gray-200",
+    blue: "bg-blue-50 text-blue-700 hover:bg-blue-100",
+    orange: "bg-orange-50 text-orange-700 hover:bg-orange-100",
+  };
+  return (
+    <button onClick={onClick} disabled={disabled}
+      className={`px-3 py-1 rounded-lg text-xs font-medium transition ${colors[color] || colors.gray} disabled:opacity-50`}>
+      {label}
+    </button>
+  );
+};
+
+const Info = ({ label, value }: { label: string; value: string }) => (
+  <div>
+    <p className="text-xs text-gray-400">{label}</p>
+    <p className="text-sm font-medium text-gray-900">{value}</p>
+  </div>
+);
+
+const Spinner = () => (
+  <div className="text-center py-12">
+    <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mx-auto" />
+  </div>
+);
+
+const Empty = ({ icon: Icon, message }: any) => (
+  <div className="text-center py-12 bg-gray-50 rounded-lg">
+    <Icon className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+    <p className="text-gray-500">{message}</p>
+  </div>
+);
+
 // ================================================================
 //  MAIN COMPONENT
 // ================================================================
 export default function UserDashboard() {
   const { user, logout } = useAuth();
-  console.log("FULL USER OBJECT:", user);
   const [activeTab, setActiveTab] = useState<TabType>("customers");
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -117,6 +226,7 @@ export default function UserDashboard() {
   const [searchTerm, setSearchTerm] = useState("");
   const [loanFilter, setLoanFilter] = useState<LoanFilter>("ALL");
   const [customerFilter, setCustomerFilter] = useState<CustomerFilter>("ALL");
+  const [accountFilter, setAccountFilter] = useState<AccountFilter>("ALL");
   const [rejectRemarks, setRejectRemarks] = useState("");
   const [rejectingId, setRejectingId] = useState<number | null>(null);
 
@@ -124,7 +234,6 @@ export default function UserDashboard() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loans, setLoans] = useState<Loan[]>([]);
   const [depositData, setDepositData] = useState({ accountId: "", amount: "", description: "" });
-
 
   const [loanApproveModal, setLoanApproveModal] = useState<Loan | null>(null);
   const [loanApproveData, setLoanApproveData] = useState({ amount: "", months: "" });
@@ -135,10 +244,21 @@ export default function UserDashboard() {
   const [accountRejectModal, setAccountRejectModal] = useState<{ accountId: number } | null>(null);
   const [accountRejectReason, setAccountRejectReason] = useState("");
 
+  // Account transactions view
+  const [viewingAccountTx, setViewingAccountTx] = useState<Account | null>(null);
+  const [accountTransactions, setAccountTransactions] = useState<Transaction[]>([]);
+  const [txLoading, setTxLoading] = useState(false);
 
   // Repayment schedule per loan
   const [repaymentSchedules, setRepaymentSchedules] = useState<Record<number, Repayment[]>>({});
   const [loadingScheduleId, setLoadingScheduleId] = useState<number | null>(null);
+
+  // Support Tickets
+  const [tickets, setTickets] = useState<SupportTicket[]>([]);
+  const [ticketStatusFilter, setTicketStatusFilter] = useState<TicketStatusFilter>("ALL");
+  const [selectedTicket, setSelectedTicket] = useState<SupportTicket | null>(null);
+  const [ticketReplyText, setTicketReplyText] = useState("");
+  const [ticketBusy, setTicketBusy] = useState(false);
 
   const showMsg = (type: "success" | "error", text: string) => {
     setMessage({ type, text });
@@ -151,14 +271,16 @@ export default function UserDashboard() {
   const fetchAll = async () => {
     setLoading(true);
     try {
-      const [cust, accs, loansData] = await Promise.all([
-        userService.getAllCustomers(),   // GET /api/customers  — staff sees assigned only
-        accountService.getAll(),         // GET /api/accounts   — staff sees assigned only
-        loanService.getAllLoans(),        // GET /api/loans      — staff sees assigned only
+      const [cust, accs, loansData, ticketsData] = await Promise.all([
+        userService.getAllCustomers(),
+        accountService.getAll(),
+        loanService.getAllLoans(),
+        supportService.getAll({ assigned_to: Number(user?.id), status: ticketStatusFilter === "ALL" ? undefined : ticketStatusFilter }),
       ]);
       setCustomers(Array.isArray(cust) ? cust : []);
-      setAccounts(Array.isArray(accs) ? accs : []);
+      setAccounts(Array.isArray(accs) ? accs : (accs as any)?.accounts || []);
       setLoans(Array.isArray(loansData) ? loansData : []);
+      setTickets(Array.isArray(ticketsData) ? ticketsData : (ticketsData as any)?.tickets || []);
     } catch (err: any) {
       showMsg("error", "Failed to load data.");
     } finally {
@@ -166,36 +288,74 @@ export default function UserDashboard() {
     }
   };
 
-
-
   const silentRefreshAll = async () => {
-    // Silently refresh all data — no loading spinner
     try {
-      const [custRes, accRes, loanRes] = await Promise.all([
+      const [custRes, accRes, loanRes, ticketRes] = await Promise.all([
         userService.getAllCustomers().catch(() => []),
         accountService.getAll().catch(() => []),
         loanService.getAllLoans().catch(() => []),
+        supportService.getAll({ assigned_to: Number(user?.id) }).catch(() => []),
       ]);
-
-      const custList = Array.isArray(custRes) ? custRes : (custRes as any).customers || [];
-      const accList = Array.isArray(accRes) ? accRes : (accRes as any).accounts || [];
-      const loanList = Array.isArray(loanRes) ? loanRes : (loanRes as any).loans || [];
-
-      setCustomers(custList);
-      setAccounts(accList);
-      setLoans(loanList);
+      setCustomers(Array.isArray(custRes) ? custRes : (custRes as any).customers || []);
+      setAccounts(Array.isArray(accRes) ? accRes : (accRes as any).accounts || []);
+      setLoans(Array.isArray(loanRes) ? loanRes : (loanRes as any).loans || []);
+      setTickets(Array.isArray(ticketRes) ? ticketRes : (ticketRes as any).tickets || []);
     } catch (_) { }
   };
 
   useEffect(() => { fetchAll(); }, []);
+  useEffect(() => { if (activeTab === "tickets") fetchAll(); }, [ticketStatusFilter]);
 
+  // Load transactions for a specific account
+  const loadAccountTransactions = async (account: Account) => {
+    setViewingAccountTx(account);
+    setTxLoading(true);
+    try {
+      const res = await api.get(`/transactions/account/${account.account_id}`);
+      const txList = Array.isArray(res) ? res : (res as any).transactions || [];
+      setAccountTransactions(txList);
+    } catch {
+      showMsg("error", "Failed to load transactions.");
+    } finally {
+      setTxLoading(false);
+    }
+  };
 
-  const anyModalOpenStaff = showProfileModal || !!loanApproveModal || !!loanRejectModal || !!accountRejectModal // add any other modals you have
+  const openTicket = async (ticketId: number) => {
+    try { setSelectedTicket(await supportService.getById(ticketId) as any); }
+    catch (err: any) { showMsg("error", err.message || "Failed to load ticket."); }
+  };
 
-  usePolling(silentRefreshAll, {
-    intervalMs: 5000,
-    paused: anyModalOpenStaff,
-  });
+  const refreshSelectedTicket = async () => {
+    await fetchAll();
+    if (selectedTicket) setSelectedTicket(await supportService.getById(selectedTicket.ticket_id) as any);
+  };
+
+  const handleTicketReply = async () => {
+    if (!selectedTicket || !ticketReplyText.trim()) return;
+    setTicketBusy(true);
+    try {
+      await supportService.reply(selectedTicket.ticket_id, ticketReplyText.trim());
+      setTicketReplyText("");
+      await refreshSelectedTicket();
+    } catch (err: any) { showMsg("error", err.message || "Failed to send reply."); }
+    finally { setTicketBusy(false); }
+  };
+
+  const handleTicketStatusChange = async (status: SupportTicket["status"]) => {
+    if (!selectedTicket) return;
+    setTicketBusy(true);
+    try {
+      await supportService.updateStatus(selectedTicket.ticket_id, status);
+      showMsg("success", "Ticket status updated.");
+      await refreshSelectedTicket();
+    } catch (err: any) { showMsg("error", err.message || "Failed to update status."); }
+    finally { setTicketBusy(false); }
+  };
+
+  const anyModalOpenStaff = showProfileModal || !!loanApproveModal || !!loanRejectModal || !!accountRejectModal || !!selectedTicket || !!viewingAccountTx;
+
+  usePolling(silentRefreshAll, { intervalMs: 5000, paused: anyModalOpenStaff });
 
   // ----------------------------------------------------------------
   //  FILTERED DATA
@@ -203,14 +363,10 @@ export default function UserDashboard() {
   const filteredCustomers = customers
     .filter(c => {
       if (customerFilter === "ALL") return true;
-      if (customerFilter === "PENDING")
-        return c.status === "PENDING" && !c.assigned_staff_id;
-      if (customerFilter === "MY_CUSTOMERS")
-        return c.assigned_staff_id === Number(user?.id);
-      if (customerFilter === "ACTIVE")
-        return c.assigned_staff_id === Number(user?.id) && c.status === "ACTIVE";
-      if (customerFilter === "REJECTED")
-        return c.assigned_staff_id === Number(user?.id) && c.status === "REJECTED";
+      if (customerFilter === "PENDING") return c.status === "PENDING" && !c.assigned_staff_id;
+      if (customerFilter === "MY_CUSTOMERS") return c.assigned_staff_id === Number(user?.id);
+      if (customerFilter === "ACTIVE") return c.assigned_staff_id === Number(user?.id) && c.status === "ACTIVE";
+      if (customerFilter === "REJECTED") return c.assigned_staff_id === Number(user?.id) && c.status === "REJECTED";
       return true;
     })
     .filter(c =>
@@ -223,19 +379,20 @@ export default function UserDashboard() {
     .filter(l => loanFilter === "ALL" || l.status === loanFilter)
     .filter(l => l.customer_name?.toLowerCase().includes(searchTerm.toLowerCase()));
 
-  const filteredAccounts = accounts.filter(a =>
-    a.customer_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    a.account_number?.includes(searchTerm)
-  );
+  const filteredAccounts = accounts
+    .filter(a => accountFilter === "ALL" || a.status?.toUpperCase() === accountFilter)
+    .filter(a =>
+      a.customer_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      a.account_number?.includes(searchTerm)
+    );
 
   // Counts for badges
   const pendingCustomers = customers.filter(c =>
     c.status === "PENDING" && c.assigned_staff_id === Number(user?.id) && !c.staff_approval_status
   ).length;
   const pendingAccounts = accounts.filter(a => a.status === "PENDING").length;
-  const pendingLoans = loans.filter(l =>
-    l.status === "PENDING" && !l.staff_approval_status
-  ).length;
+  const pendingLoans = loans.filter(l => l.status === "PENDING" && !l.staff_approval_status).length;
+  const openTicketsCount = tickets.filter(t => t.status === "OPEN" || t.status === "IN_PROGRESS").length;
 
   // ----------------------------------------------------------------
   //  CUSTOMER ACTIONS
@@ -315,7 +472,6 @@ export default function UserDashboard() {
 
   // ── REPAYMENT SCHEDULE ────────────────────────────────────────────
   const loadRepaymentSchedule = async (loanId: number) => {
-    // Toggle: hide if already loaded
     if (repaymentSchedules[loanId]) {
       setRepaymentSchedules(prev => { const next = { ...prev }; delete next[loanId]; return next; });
       return;
@@ -393,18 +549,18 @@ export default function UserDashboard() {
         {message.text && (
           <div className={`mb-6 p-4 rounded-lg ${message.type === "success"
             ? "bg-green-50 border border-green-200 text-green-700"
-            : "bg-red-50 border border-red-200 text-red-700"
-            }`}>{message.text}</div>
+            : "bg-red-50 border border-red-200 text-red-700"}`}>
+            {message.text}
+          </div>
         )}
 
         {/* Quick Stats */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
           <StatCard label="Pending Customers" value={pendingCustomers} icon={<Users className="w-7 h-7 text-yellow-500" />} />
           <StatCard label="Pending Accounts" value={pendingAccounts} icon={<CreditCard className="w-7 h-7 text-blue-500" />} />
           <StatCard label="Pending Loans" value={pendingLoans} icon={<FileText className="w-7 h-7 text-orange-500" />} />
-          <StatCard label="My Customers"
-            value={customers.filter(c => c.assigned_staff_id === user?.id).length}
-            icon={<Building className="w-7 h-7 text-green-500" />} />
+          <StatCard label="My Customers" value={customers.filter(c => c.assigned_staff_id === Number(user?.id)).length} icon={<Building className="w-7 h-7 text-green-500" />} />
+          <StatCard label="Open Tickets" value={openTicketsCount} icon={<MessageSquare className="w-7 h-7 text-purple-500" />} />
         </div>
 
         {/* Tabs */}
@@ -416,13 +572,11 @@ export default function UserDashboard() {
                 { id: "accounts", label: "Accounts", icon: CreditCard, badge: pendingAccounts },
                 { id: "loans", label: "Loans", icon: FileText, badge: pendingLoans },
                 { id: "deposit", label: "Deposit", icon: DollarSign, badge: undefined },
+                { id: "tickets", label: "My Tickets", icon: MessageSquare, badge: openTicketsCount || undefined },
               ] satisfies { id: TabType; label: string; icon: React.ElementType; badge: number | undefined }[]).map(tab => (
                 <button key={tab.id}
                   onClick={() => { setActiveTab(tab.id); setSearchTerm(""); }}
-                  className={`px-5 py-3 flex items-center gap-2 border-b-2 transition ${activeTab === tab.id
-                    ? "border-blue-600 text-blue-600"
-                    : "border-transparent text-gray-500 hover:text-gray-700"
-                    }`}>
+                  className={`px-5 py-3 flex items-center gap-2 border-b-2 transition ${activeTab === tab.id ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
                   <tab.icon className="w-4 h-4" />
                   {tab.label}
                   {tab.badge ? (
@@ -442,10 +596,7 @@ export default function UserDashboard() {
                   <h2 className="text-lg font-semibold text-gray-900">Customer Management</h2>
                   <div className="flex flex-wrap gap-2">
                     {(["ALL", "PENDING", "MY_CUSTOMERS", "ACTIVE", "REJECTED"] as CustomerFilter[]).map(f => (
-                      <FilterBtn key={f}
-                        label={f === "MY_CUSTOMERS" ? "My Customers" : f}
-                        active={customerFilter === f}
-                        onClick={() => setCustomerFilter(f)} />
+                      <FilterBtn key={f} label={f === "MY_CUSTOMERS" ? "My Customers" : f} active={customerFilter === f} onClick={() => setCustomerFilter(f)} />
                     ))}
                   </div>
                 </div>
@@ -476,52 +627,36 @@ export default function UserDashboard() {
                             <td className="px-4 py-3 text-sm text-gray-500">{c.city || "—"}</td>
                             <td className="px-4 py-3 text-sm text-gray-500">
                               {c.assigned_staff_name
-                                ? <span className="inline-flex items-center gap-1">
-                                  <UserCheck className="w-3 h-3 text-blue-500" />
-                                  {c.assigned_staff_name}
-                                </span>
-                                : <span className="text-xs text-gray-400 italic">Unassigned</span>
-                              }
+                                ? <span className="inline-flex items-center gap-1"><UserCheck className="w-3 h-3 text-blue-500" />{c.assigned_staff_name}</span>
+                                : <span className="text-xs text-gray-400 italic">Unassigned</span>}
                             </td>
                             <td className="px-4 py-3"><StatusBadge status={c.status} /></td>
                             <td className="px-4 py-3">
-                              {c.staff_approval_status
-                                ? <StatusBadge status={c.staff_approval_status} />
-                                : <span className="text-xs text-gray-400">Pending</span>}
+                              {c.staff_approval_status ? <StatusBadge status={c.staff_approval_status} /> : <span className="text-xs text-gray-400">Pending</span>}
                             </td>
                             <td className="px-4 py-3">
-                              {/* Unassigned OR assigned-to-me: show approve/reject */}
-                              {(!c.assigned_staff_id || c.assigned_staff_id === Number(user?.id)) &&
-                                c.status === "PENDING" &&
-                                !c.staff_approval_status && (
-                                  <div className="flex flex-wrap gap-1">
-                                    <Btn label="Approve" color="green" onClick={() => handleApproveCustomer(c.customer_id)} />
-                                    {rejectingId === c.customer_id ? (
-                                      <div className="flex gap-1 items-center">
-                                        <input type="text" placeholder="Reason (required)"
-                                          value={rejectRemarks}
-                                          onChange={e => setRejectRemarks(e.target.value)}
-                                          className="border border-gray-300 rounded px-2 py-1 text-xs w-36" />
-                                        <Btn label="Confirm" color="red" onClick={() => handleRejectCustomer(c.customer_id)} />
-                                        <Btn label="Cancel" color="gray" onClick={() => { setRejectingId(null); setRejectRemarks(""); }} />
-                                      </div>
-                                    ) : (
-                                      <Btn label="Reject" color="red" onClick={() => setRejectingId(c.customer_id)} />
-                                    )}
-                                  </div>
-                                )}
-
-                              {c.staff_approval_status === "APPROVED" &&
-                                c.status !== "ACTIVE" &&
-                                c.admin_approval_status !== "APPROVED" && (
-                                  <span className="text-xs text-blue-600 font-medium">Awaiting Admin</span>
-                                )}
-
-                              {/* Only show if assigned to a DIFFERENT staff member */}
-                              {c.assigned_staff_id !== null &&
-                                c.assigned_staff_id !== Number(user?.id) && (
-                                  <span className="text-xs text-gray-400">Not assigned to you</span>
-                                )}
+                              {(!c.assigned_staff_id || c.assigned_staff_id === Number(user?.id)) && c.status === "PENDING" && !c.staff_approval_status && (
+                                <div className="flex flex-wrap gap-1">
+                                  <Btn label="Approve" color="green" onClick={() => handleApproveCustomer(c.customer_id)} />
+                                  {rejectingId === c.customer_id ? (
+                                    <div className="flex gap-1 items-center">
+                                      <input type="text" placeholder="Reason (required)" value={rejectRemarks}
+                                        onChange={e => setRejectRemarks(e.target.value)}
+                                        className="border border-gray-300 rounded px-2 py-1 text-xs w-36" />
+                                      <Btn label="Confirm" color="red" onClick={() => handleRejectCustomer(c.customer_id)} />
+                                      <Btn label="Cancel" color="gray" onClick={() => { setRejectingId(null); setRejectRemarks(""); }} />
+                                    </div>
+                                  ) : (
+                                    <Btn label="Reject" color="red" onClick={() => setRejectingId(c.customer_id)} />
+                                  )}
+                                </div>
+                              )}
+                              {c.staff_approval_status === "APPROVED" && c.status !== "ACTIVE" && c.admin_approval_status !== "APPROVED" && (
+                                <span className="text-xs text-blue-600 font-medium">Awaiting Admin</span>
+                              )}
+                              {c.assigned_staff_id !== null && c.assigned_staff_id !== Number(user?.id) && (
+                                <span className="text-xs text-gray-400">Not assigned to you</span>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -535,7 +670,18 @@ export default function UserDashboard() {
             {/* ── ACCOUNTS TAB ── */}
             {activeTab === "accounts" && (
               <div>
-                <h2 className="text-lg font-semibold text-gray-900 mb-4">Account Management</h2>
+                <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
+                  <h2 className="text-lg font-semibold text-gray-900">Account Management</h2>
+                  <div className="flex flex-wrap gap-2">
+                    {(["ALL", "PENDING", "ACTIVE", "FROZEN", "CLOSURE_PENDING", "CLOSED"] as AccountFilter[]).map(f => (
+                      <FilterBtn key={f}
+                        label={f === "CLOSURE_PENDING" ? "Closure Pending" : f}
+                        active={accountFilter === f}
+                        onClick={() => setAccountFilter(f)} />
+                    ))}
+                  </div>
+                </div>
+
                 <SearchBar value={searchTerm} onChange={setSearchTerm} placeholder="Search by customer or account number..." />
 
                 {loading ? <Spinner /> : filteredAccounts.length === 0 ? (
@@ -545,26 +691,28 @@ export default function UserDashboard() {
                     <table className="min-w-full divide-y divide-gray-200">
                       <thead className="bg-gray-50">
                         <tr>
-                          {["Customer", "Account No.", "Type", "Balance", "Status", "Opened", "Actions"].map(h => (
-                            <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
+                          {["Customer", "Account No.", "Type", "Balance", "Status", "Opened", "Closed", "Actions"].map(h => (
+                            <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">{h}</th>
                           ))}
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
                         {filteredAccounts.map(a => (
-                          <tr key={a.account_id} className="hover:bg-gray-50">
-                            <td className="px-4 py-3 text-sm font-medium text-gray-900">{a.customer_name}</td>
+                          <tr key={a.account_id} className={`hover:bg-gray-50 ${a.status === "FROZEN" ? "bg-blue-50" : a.status === "CLOSURE_PENDING" ? "bg-orange-50" : ""}`}>
+                            <td className="px-4 py-3">
+                              <p className="text-sm font-medium text-gray-900">{a.customer_name}</p>
+                              <p className="text-xs text-gray-400">{a.customer_email}</p>
+                            </td>
                             <td className="px-4 py-3 text-sm font-mono text-gray-700">{a.account_number}</td>
                             <td className="px-4 py-3">
-                              <span className="px-2 py-1 text-xs rounded-full bg-purple-100 text-purple-800">
-                                {a.account_type}
-                              </span>
+                              <span className="px-2 py-1 text-xs rounded-full bg-purple-100 text-purple-800">{a.account_type}</span>
                             </td>
                             <td className="px-4 py-3 text-sm font-semibold text-gray-900">{formatCurrency(a.balance)}</td>
                             <td className="px-4 py-3"><StatusBadge status={a.status} /></td>
-                            <td className="px-4 py-3 text-sm text-gray-500">{formatDate(a.opened_date)}</td>
+                            <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">{formatDate(a.opened_date)}</td>
+                            <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">{a.closed_date ? formatDate(a.closed_date) : "—"}</td>
                             <td className="px-4 py-3">
-                              <div className="flex gap-1">
+                              <div className="flex flex-wrap gap-1">
                                 {a.status === "PENDING" && (
                                   <>
                                     <Btn label="Approve" color="green" onClick={() => handleApproveAccount(a.account_id)} />
@@ -572,11 +720,25 @@ export default function UserDashboard() {
                                   </>
                                 )}
                                 {a.status === "ACTIVE" && (
-                                  <Btn label="Deposit" color="blue"
-                                    onClick={() => {
-                                      setDepositData({ accountId: a.account_id.toString(), amount: "", description: "" });
-                                      setActiveTab("deposit");
-                                    }} />
+                                  <>
+                                    <Btn label="Deposit" color="blue"
+                                      onClick={() => { setDepositData({ accountId: a.account_id.toString(), amount: "", description: "" }); setActiveTab("deposit"); }} />
+                                    <Btn label="Transactions" color="gray"
+                                      onClick={() => loadAccountTransactions(a)} />
+                                  </>
+                                )}
+                                {a.status === "FROZEN" && (
+                                  <span className="text-xs text-blue-600 font-medium flex items-center gap-1">
+                                    <Shield className="w-3 h-3" /> Frozen — Admin action required
+                                  </span>
+                                )}
+                                {a.status === "CLOSURE_PENDING" && (
+                                  <span className="text-xs text-orange-600 font-medium flex items-center gap-1">
+                                    <Clock className="w-3 h-3" /> Awaiting Admin Closure
+                                  </span>
+                                )}
+                                {(a.status === "CLOSED" || a.status === "REJECTED") && (
+                                  <Btn label="View Transactions" color="gray" onClick={() => loadAccountTransactions(a)} />
                                 )}
                               </div>
                             </td>
@@ -595,7 +757,7 @@ export default function UserDashboard() {
                 <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
                   <h2 className="text-lg font-semibold text-gray-900">Loan Management</h2>
                   <div className="flex flex-wrap gap-2">
-                    {(["ALL", "PENDING", "ACTIVE", "REJECTED"] as LoanFilter[]).map(f => (
+                    {(["ALL", "PENDING", "ACTIVE", "REJECTED", "CLOSED"] as LoanFilter[]).map(f => (
                       <FilterBtn key={f} label={f} active={loanFilter === f} onClick={() => setLoanFilter(f)} />
                     ))}
                   </div>
@@ -610,28 +772,18 @@ export default function UserDashboard() {
                       const canViewSchedule = loan.status === "ACTIVE" || loan.status === "CLOSED";
                       const paidCount = schedule ? schedule.filter(r => r.status === "PAID").length : 0;
                       const overdueCount = schedule ? schedule.filter(r => r.status === "OVERDUE").length : 0;
-
-                      // Only show "Awaiting Admin" if:
-                      // - staff has approved, AND
-                      // - admin has NOT yet approved, AND
-                      // - loan is still PENDING (not already ACTIVE/CLOSED/etc.)
                       const isTerminal = ["ACTIVE", "CLOSED", "DEFAULTED"].includes(loan.status?.toUpperCase());
-                      const showAwaitingAdmin =
-                        !isTerminal &&
-                        loan.staff_approval_status === "APPROVED" &&
-                        loan.admin_approval_status?.toUpperCase() !== "APPROVED";
+                      const showAwaitingAdmin = !isTerminal && loan.staff_approval_status === "APPROVED" && loan.admin_approval_status?.toUpperCase() !== "APPROVED";
 
                       return (
                         <div key={loan.loan_id} className="border border-gray-200 rounded-xl p-5 hover:shadow-md transition">
                           <div className="flex justify-between items-start">
                             <div className="flex-1">
-                              <div className="flex items-center gap-3 mb-3">
+                              <div className="flex items-center gap-3 mb-3 flex-wrap">
                                 <StatusBadge status={loan.status} />
                                 <span className="text-sm text-gray-500">Loan #{loan.loan_id}</span>
                                 {loan.staff_approval_status && (
-                                  <span className="text-xs text-gray-500">
-                                    Staff: <StatusBadge status={loan.staff_approval_status} />
-                                  </span>
+                                  <span className="text-xs text-gray-500">Staff: <StatusBadge status={loan.staff_approval_status} /></span>
                                 )}
                               </div>
                               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -643,11 +795,34 @@ export default function UserDashboard() {
                                 {loan.approved_amount && (
                                   <Info label="Approved Amt" value={formatCurrency(loan.approved_amount)} />
                                 )}
+                                {/* Disbursement info — visible to staff */}
+                                {loan.disbursed_amount && (
+                                  <Info label="Disbursed" value={formatCurrency(loan.disbursed_amount)} />
+                                )}
+                                {loan.disbursed_at && (
+                                  <Info label="Disbursed On" value={formatDate(loan.disbursed_at)} />
+                                )}
+                                {loan.start_date && (
+                                  <Info label="Start Date" value={formatDate(loan.start_date)} />
+                                )}
+                                {loan.end_date && (
+                                  <Info label="End Date" value={formatDate(loan.end_date)} />
+                                )}
                               </div>
                               <p className="text-xs text-gray-400 mt-2">Applied: {formatDate(loan.created_at)}</p>
                               {loan.staff_approval_remarks && (
                                 <div className="mt-2 p-2 bg-yellow-50 rounded text-xs text-yellow-700">
                                   Remarks: {loan.staff_approval_remarks}
+                                </div>
+                              )}
+                              {loan.status === "CLOSED" && (
+                                <div className="mt-2 p-2 bg-gray-100 rounded text-xs text-gray-700 flex items-center gap-1">
+                                  <CheckCircle className="w-3 h-3 text-gray-500" /> Loan fully repaid and closed
+                                </div>
+                              )}
+                              {loan.status === "DEFAULTED" && (
+                                <div className="mt-2 p-2 bg-red-50 rounded text-xs text-red-700 flex items-center gap-1">
+                                  <AlertCircle className="w-3 h-3" /> Loan defaulted — contact customer immediately
                                 </div>
                               )}
                             </div>
@@ -664,14 +839,13 @@ export default function UserDashboard() {
                             </div>
                           </div>
 
-                          {/* Repayment timeline — for ACTIVE and CLOSED loans */}
+                          {/* Repayment timeline */}
                           {canViewSchedule && (
                             <div className="mt-4">
                               <button
                                 onClick={() => loadRepaymentSchedule(loan.loan_id)}
                                 disabled={loadingScheduleId === loan.loan_id}
-                                className="w-full flex items-center justify-between p-3 bg-blue-50 rounded-xl text-blue-700 hover:bg-blue-100 transition font-medium text-sm"
-                              >
+                                className="w-full flex items-center justify-between p-3 bg-blue-50 rounded-xl text-blue-700 hover:bg-blue-100 transition font-medium text-sm">
                                 <div className="flex items-center gap-2">
                                   <Calendar className="w-4 h-4" />
                                   <span>Repayment Timeline ({loan.duration_months} installments)</span>
@@ -688,24 +862,14 @@ export default function UserDashboard() {
 
                               {schedule && schedule.length > 0 && (
                                 <div className="mt-2 border rounded-xl overflow-hidden">
-                                  {/* Auto-deduct notice */}
                                   <div className={`px-4 py-2 text-xs font-medium flex items-center gap-2 border-b ${loan.auto_deduct ? "bg-green-50 text-green-800" : "bg-amber-50 text-amber-800"}`}>
                                     {loan.auto_deduct
-                                      ? <><CheckCircle className="w-3.5 h-3.5 flex-shrink-0" /> Auto-deduction ON — EMI will be deducted automatically on each due date. Customer can pay early to avoid deduction.</>
-                                      : <><AlertCircle className="w-3.5 h-3.5 flex-shrink-0" /> Manual payment — Customer must pay each EMI before the due date.</>
-                                    }
+                                      ? <><CheckCircle className="w-3.5 h-3.5 flex-shrink-0" /> Auto-deduction ON</>
+                                      : <><AlertCircle className="w-3.5 h-3.5 flex-shrink-0" /> Manual payment</>}
                                   </div>
-
-                                  {/* Summary bar */}
                                   <div className="bg-gray-50 px-4 py-3 border-b grid grid-cols-3 gap-2 text-center text-xs">
-                                    <div>
-                                      <div className="text-gray-500">Paid</div>
-                                      <div className="font-bold text-green-600">{paidCount}/{schedule.length}</div>
-                                    </div>
-                                    <div>
-                                      <div className="text-gray-500">Overdue</div>
-                                      <div className="font-bold text-red-600">{overdueCount}</div>
-                                    </div>
+                                    <div><div className="text-gray-500">Paid</div><div className="font-bold text-green-600">{paidCount}/{schedule.length}</div></div>
+                                    <div><div className="text-gray-500">Overdue</div><div className="font-bold text-red-600">{overdueCount}</div></div>
                                     <div>
                                       <div className="text-gray-500">Remaining</div>
                                       <div className="font-bold text-blue-600">
@@ -713,47 +877,25 @@ export default function UserDashboard() {
                                       </div>
                                     </div>
                                   </div>
-
-                                  {/* Timeline rows */}
                                   <div className="max-h-72 overflow-y-auto divide-y divide-gray-100">
                                     {schedule.map(r => {
                                       const isPaid = r.status === "PAID";
                                       const isOverdue = r.status === "OVERDUE";
-                                      const isPending = !isPaid && !isOverdue;
                                       return (
                                         <div key={r.repayment_id}
                                           className={`flex items-center gap-3 px-4 py-3 ${isPaid ? "bg-green-50" : isOverdue ? "bg-red-50" : "bg-white"}`}>
-                                          {/* Timeline dot */}
                                           <div className={`w-3 h-3 rounded-full flex-shrink-0 ${isPaid ? "bg-green-500" : isOverdue ? "bg-red-500" : "bg-gray-300"}`} />
                                           <div className="flex-1 min-w-0">
                                             <div className="flex items-center gap-2 flex-wrap">
-                                              <span className="text-sm font-medium text-gray-700">
-                                                Installment #{r.installment_no}
-                                              </span>
+                                              <span className="text-sm font-medium text-gray-700">Installment #{r.installment_no}</span>
                                               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${isPaid ? "bg-green-100 text-green-700" : isOverdue ? "bg-red-100 text-red-700" : "bg-yellow-100 text-yellow-700"}`}>
                                                 {r.status}
                                               </span>
                                             </div>
-                                            <div className="text-xs text-gray-500 mt-0.5 space-y-0.5">
-                                              {isPaid ? (
-                                                <>
-                                                  <span>Due: {formatDate(r.due_date)}</span>
-                                                  {r.paid_date && (
-                                                    <span className="ml-2 text-green-600 font-medium">• Paid: {formatDate(r.paid_date)}</span>
-                                                  )}
-                                                </>
-                                              ) : isPending ? (
-                                                <>
-                                                  <span className="font-medium text-gray-700">
-                                                    {loan.auto_deduct
-                                                      ? <>Auto-deduct on: <span className="text-blue-600">{formatDate(r.due_date)}</span></>
-                                                      : <>Pay by: <span className="text-orange-600">{formatDate(r.due_date)}</span></>
-                                                    }
-                                                  </span>
-                                                </>
-                                              ) : (
-                                                <span className="text-red-600 font-medium">Was due: {formatDate(r.due_date)}</span>
-                                              )}
+                                            <div className="text-xs text-gray-500 mt-0.5">
+                                              {isPaid
+                                                ? <><span>Due: {formatDate(r.due_date)}</span>{r.paid_date && <span className="ml-2 text-green-600 font-medium">• Paid: {formatDate(r.paid_date)}</span>}</>
+                                                : <span className={isOverdue ? "text-red-600 font-medium" : ""}>Due: {formatDate(r.due_date)}</span>}
                                             </div>
                                           </div>
                                           <div className={`text-sm font-bold flex-shrink-0 ${isPaid ? "text-green-600" : isOverdue ? "text-red-600" : "text-gray-900"}`}>
@@ -784,8 +926,7 @@ export default function UserDashboard() {
                     <label className="block text-sm font-medium text-gray-700 mb-1">Account</label>
                     <select value={depositData.accountId}
                       onChange={e => setDepositData({ ...depositData, accountId: e.target.value })}
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500"
-                      required>
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500" required>
                       <option value="">Select account...</option>
                       {accounts.filter(a => a.status === "ACTIVE").map(a => (
                         <option key={a.account_id} value={a.account_id}>
@@ -799,8 +940,7 @@ export default function UserDashboard() {
                     <input type="number" min="1" step="0.01"
                       value={depositData.amount}
                       onChange={e => setDepositData({ ...depositData, amount: e.target.value })}
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500"
-                      required />
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500" required />
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Description (optional)</label>
@@ -825,6 +965,56 @@ export default function UserDashboard() {
               </div>
             )}
 
+            {/* ── TICKETS TAB ── */}
+            {activeTab === "tickets" && (
+              <div>
+                <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
+                  <h2 className="text-lg font-semibold text-gray-900">My Support Tickets</h2>
+                  <div className="flex flex-wrap gap-2">
+                    {(["ALL", "OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"] as TicketStatusFilter[]).map(f => (
+                      <FilterBtn key={f} label={f === "IN_PROGRESS" ? "In Progress" : f} active={ticketStatusFilter === f} onClick={() => setTicketStatusFilter(f)} highlight={f === "OPEN"} />
+                    ))}
+                  </div>
+                </div>
+
+                {loading ? <Spinner /> : tickets.length === 0 ? (
+                  <Empty icon={MessageSquare} message="No tickets assigned to you" />
+                ) : (
+                  <div className="space-y-3">
+                    {tickets
+                      .filter(t => ticketStatusFilter === "ALL" || t.status === ticketStatusFilter)
+                      .map(ticket => {
+                        const priorityColors: Record<string, string> = {
+                          HIGH: "bg-red-100 text-red-700",
+                          MEDIUM: "bg-yellow-100 text-yellow-700",
+                          LOW: "bg-green-100 text-green-700",
+                        };
+                        const isOpen = ticket.status === "IN_PROGRESS";
+                        return (
+                          <div key={ticket.ticket_id}
+                            className={`border rounded-xl p-4 hover:shadow-md transition cursor-pointer ${isOpen ? "border-yellow-300 bg-yellow-50" : "border-gray-200"}`}
+                            onClick={() => openTicket(ticket.ticket_id)}>
+                            <div className="flex justify-between items-start gap-3">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap mb-1">
+                                  <span className="text-sm font-semibold text-gray-900">{ticket.subject}</span>
+                                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${priorityColors[ticket.priority] || "bg-gray-100 text-gray-700"}`}>
+                                    {ticket.priority}
+                                  </span>
+                                </div>
+                                <p className="text-xs text-gray-500">Customer: {ticket.customer_name} • #{ticket.ticket_id} • {ticket.category}</p>
+                                <p className="text-xs text-gray-400 mt-1">{formatDate(ticket.created_at)}</p>
+                              </div>
+                              <StatusBadge status={ticket.status} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+            )}
+
           </div>
         </div>
 
@@ -834,8 +1024,6 @@ export default function UserDashboard() {
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 p-6">
               <h3 className="text-lg font-bold text-gray-900 mb-1">Approve Loan</h3>
               <p className="text-sm text-gray-500 mb-4">Review the application then enter your approved terms.</p>
-
-              {/* Loan details summary */}
               <div className="bg-gray-50 rounded-xl p-4 mb-5 grid grid-cols-2 gap-3">
                 <Info label="Customer" value={loanApproveModal.customer_name} />
                 <Info label="Loan Type" value={loanApproveModal.loan_type} />
@@ -844,46 +1032,33 @@ export default function UserDashboard() {
                 <Info label="Interest Rate" value={`${loanApproveModal.interest_rate}%`} />
                 <Info label="Applied On" value={formatDate(loanApproveModal.created_at)} />
               </div>
-
-              {/* Input fields */}
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Approved Amount (PKR)
                     <span className="text-gray-400 font-normal ml-1">— applied for {formatCurrency(loanApproveModal.loan_amount)}</span>
                   </label>
-                  <input
-                    type="number" min="1" autoFocus
+                  <input type="number" min="1" autoFocus
                     value={loanApproveData.amount}
                     onChange={e => setLoanApproveData(p => ({ ...p, amount: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500"
-                    placeholder={`Max: ${formatCurrency(loanApproveModal.loan_amount)}`}
-                  />
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500"
+                    placeholder={`Max: ${formatCurrency(loanApproveModal.loan_amount)}`} />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Duration (months)
                     <span className="text-gray-400 font-normal ml-1">— requested {loanApproveModal.duration_months} months</span>
                   </label>
-                  <input
-                    type="number" min="1"
+                  <input type="number" min="1"
                     value={loanApproveData.months}
                     onChange={e => setLoanApproveData(p => ({ ...p, months: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500"
-                    placeholder={`e.g. ${loanApproveModal.duration_months}`}
-                  />
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500"
+                    placeholder={`e.g. ${loanApproveModal.duration_months}`} />
                 </div>
               </div>
-
               <div className="flex gap-3 mt-6">
-                <button onClick={handleApproveLoan}
-                  className="flex-1 bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 text-sm font-medium">
-                  Confirm Approval
-                </button>
-                <button onClick={() => setLoanApproveModal(null)}
-                  className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 text-sm">
-                  Cancel
-                </button>
+                <button onClick={handleApproveLoan} className="flex-1 bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 text-sm font-medium">Confirm Approval</button>
+                <button onClick={() => setLoanApproveModal(null)} className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 text-sm">Cancel</button>
               </div>
             </div>
           </div>
@@ -895,22 +1070,13 @@ export default function UserDashboard() {
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6">
               <h3 className="text-lg font-bold text-gray-900 mb-1">Reject Loan</h3>
               <p className="text-sm text-gray-500 mb-5">Provide a reason — the customer will see this.</p>
-              <textarea
-                autoFocus rows={3}
-                value={loanRejectReason}
+              <textarea autoFocus rows={3} value={loanRejectReason}
                 onChange={e => setLoanRejectReason(e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500 resize-none"
-                placeholder="e.g. Insufficient income documentation..."
-              />
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500 resize-none"
+                placeholder="e.g. Insufficient income documentation..." />
               <div className="flex gap-3 mt-4">
-                <button onClick={handleRejectLoan}
-                  className="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 text-sm font-medium">
-                  Confirm Rejection
-                </button>
-                <button onClick={() => setLoanRejectModal(null)}
-                  className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 text-sm">
-                  Cancel
-                </button>
+                <button onClick={handleRejectLoan} className="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 text-sm font-medium">Confirm Rejection</button>
+                <button onClick={() => setLoanRejectModal(null)} className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 text-sm">Cancel</button>
               </div>
             </div>
           </div>
@@ -922,22 +1088,147 @@ export default function UserDashboard() {
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6">
               <h3 className="text-lg font-bold text-gray-900 mb-1">Reject Account</h3>
               <p className="text-sm text-gray-500 mb-5">Reason is optional but helps the customer.</p>
-              <textarea
-                autoFocus rows={3}
-                value={accountRejectReason}
+              <textarea autoFocus rows={3} value={accountRejectReason}
                 onChange={e => setAccountRejectReason(e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500 resize-none"
-                placeholder="e.g. Invalid documents submitted..."
-              />
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500 resize-none"
+                placeholder="e.g. Invalid documents submitted..." />
               <div className="flex gap-3 mt-4">
-                <button onClick={handleRejectAccount}
-                  className="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 text-sm font-medium">
-                  Confirm Rejection
+                <button onClick={handleRejectAccount} className="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 text-sm font-medium">Confirm Rejection</button>
+                <button onClick={() => setAccountRejectModal(null)} className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 text-sm">Cancel</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── TICKET DETAIL MODAL ── */}
+        {selectedTicket && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-4 flex flex-col max-h-[90vh]">
+              {/* Header */}
+              <div className="flex items-center justify-between p-5 border-b">
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">{selectedTicket.subject}</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    #{selectedTicket.ticket_id} • {selectedTicket.category} • {selectedTicket.customer_name} • {formatDate(selectedTicket.created_at)}
+                  </p>
+                </div>
+                <button onClick={() => setSelectedTicket(null)} className="p-2 text-gray-400 hover:text-gray-600 rounded-full hover:bg-gray-100">
+                  <X className="w-5 h-5" />
                 </button>
-                <button onClick={() => setAccountRejectModal(null)}
-                  className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-gray-200 text-sm">
-                  Cancel
+              </div>
+
+              {/* Status controls */}
+              <div className="px-5 py-3 bg-gray-50 border-b flex flex-wrap gap-2 items-center">
+                <span className="text-xs font-medium text-gray-600">Status:</span>
+                {(["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"] as SupportTicket["status"][]).map(s => (
+                  <button key={s} disabled={ticketBusy || selectedTicket.status === s}
+                    onClick={() => handleTicketStatusChange(s)}
+                    className={`text-xs px-3 py-1 rounded-full font-medium transition ${selectedTicket.status === s ? "bg-blue-600 text-white" : "bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50"}`}>
+                    {s === "IN_PROGRESS" ? "In Progress" : s}
+                  </button>
+                ))}
+              </div>
+
+              {/* Description */}
+              <div className="px-5 py-3 border-b bg-blue-50">
+                <p className="text-xs font-medium text-blue-700 mb-1">Customer's issue:</p>
+                <p className="text-sm text-gray-800">{selectedTicket.description}</p>
+              </div>
+
+              {/* Replies */}
+              <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+                {(!selectedTicket.replies || selectedTicket.replies.length === 0) ? (
+                  <p className="text-sm text-gray-400 text-center py-4">No replies yet. Be the first to respond.</p>
+                ) : selectedTicket.replies.map(r => {
+                  const isStaff = r.sender_type === "STAFF";
+                  const isAdmin = r.sender_type === "ADMIN";
+                  return (
+                    <div key={r.reply_id} className={`flex ${isStaff || isAdmin ? "justify-end" : "justify-start"}`}>
+                      <div className={`max-w-xs lg:max-w-md px-4 py-2.5 rounded-2xl text-sm ${isStaff ? "bg-blue-600 text-white rounded-br-sm" : isAdmin ? "bg-purple-600 text-white rounded-br-sm" : "bg-gray-100 text-gray-800 rounded-bl-sm"}`}>
+                        <p className={`text-xs font-medium mb-1 ${isStaff || isAdmin ? "text-blue-100" : "text-gray-500"}`}>
+                          {r.sender_name || r.sender_type}
+                        </p>
+                        <p>{r.message}</p>
+                        <p className={`text-xs mt-1 ${isStaff || isAdmin ? "text-blue-200" : "text-gray-400"}`}>{formatDate(r.created_at)}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Reply input */}
+              {selectedTicket.status !== "CLOSED" && selectedTicket.status !== "RESOLVED" && (
+                <div className="p-4 border-t flex gap-2">
+                  <input
+                    type="text"
+                    value={ticketReplyText}
+                    onChange={e => setTicketReplyText(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleTicketReply(); } }}
+                    placeholder="Type your reply..."
+                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500"
+                    disabled={ticketBusy} />
+                  <button onClick={handleTicketReply} disabled={ticketBusy || !ticketReplyText.trim()}
+                    className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2">
+                    <Send className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── ACCOUNT TRANSACTIONS MODAL ── */}
+        {viewingAccountTx && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh]">
+              <div className="flex items-center justify-between p-5 border-b">
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Transaction History</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {viewingAccountTx.account_number} • {viewingAccountTx.account_type} • {viewingAccountTx.customer_name}
+                  </p>
+                </div>
+                <button onClick={() => { setViewingAccountTx(null); setAccountTransactions([]); }}
+                  className="p-2 text-gray-400 hover:text-gray-600 rounded-full hover:bg-gray-100">
+                  <X className="w-5 h-5" />
                 </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-4">
+                {txLoading ? <Spinner /> : accountTransactions.length === 0 ? (
+                  <Empty icon={TrendingUp} message="No transactions found" />
+                ) : (
+                  <div className="space-y-3">
+                    {accountTransactions.map((t: any) => {
+                      const isCredit = t.direction === "CREDIT";
+                      return (
+                        <div key={t.transaction_id}
+                          className={`border rounded-xl p-4 ${isCredit ? "border-l-4 border-l-green-500" : "border-l-4 border-l-red-500"} ${t.is_fraud ? "bg-red-50 border-red-200" : "bg-white"}`}>
+                          <div className="flex justify-between items-start">
+                            <div>
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${isCredit ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
+                                  {isCredit ? "CREDIT" : "DEBIT"}
+                                </span>
+                                <span className="text-xs text-gray-400">{t.transaction_type}</span>
+                                {t.is_fraud === 1 && (
+                                  <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700 flex items-center gap-1">
+                                    <AlertCircle className="w-3 h-3" /> FRAUD FLAG
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-sm text-gray-800">{t.description || "Transaction"}</p>
+                              <p className="text-xs text-gray-400 mt-1">{formatDate(t.transaction_time || t.created_at)}</p>
+                            </div>
+                            <span className={`text-base font-bold ${isCredit ? "text-green-600" : "text-red-600"}`}>
+                              {isCredit ? "+" : "-"}PKR {Number(t.amount).toLocaleString()}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -950,70 +1241,3 @@ export default function UserDashboard() {
     </div>
   );
 }
-
-// ================================================================
-//  HELPER COMPONENTS
-// ================================================================
-const StatCard = ({ label, value, icon }: any) => (
-  <div className="bg-white rounded-lg shadow p-4">
-    <div className="flex items-center justify-between">
-      <div>
-        <p className="text-xs text-gray-500 mb-1">{label}</p>
-        <p className="text-xl font-bold text-gray-900">{value}</p>
-      </div>
-      {icon}
-    </div>
-  </div>
-);
-
-const SearchBar = ({ value, onChange, placeholder }: any) => (
-  <div className="mb-4 relative">
-    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-4 h-4" />
-    <input type="text" value={value} onChange={e => onChange(e.target.value)}
-      placeholder={placeholder}
-      className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" />
-  </div>
-);
-
-const FilterBtn = ({ label, active, onClick }: any) => (
-  <button onClick={onClick}
-    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${active ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-      }`}>
-    {label}
-  </button>
-);
-
-const Btn = ({ label, color, onClick }: any) => {
-  const colors: Record<string, string> = {
-    green: "bg-green-50 text-green-700 hover:bg-green-100",
-    red: "bg-red-50 text-red-700 hover:bg-red-100",
-    gray: "bg-gray-100 text-gray-700 hover:bg-gray-200",
-    blue: "bg-blue-50 text-blue-700 hover:bg-blue-100",
-  };
-  return (
-    <button onClick={onClick}
-      className={`px-3 py-1 rounded-lg text-xs font-medium transition ${colors[color] || colors.gray}`}>
-      {label}
-    </button>
-  );
-};
-
-const Info = ({ label, value }: { label: string; value: string }) => (
-  <div>
-    <p className="text-xs text-gray-400">{label}</p>
-    <p className="text-sm font-medium text-gray-900">{value}</p>
-  </div>
-);
-
-const Spinner = () => (
-  <div className="text-center py-12">
-    <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mx-auto" />
-  </div>
-);
-
-const Empty = ({ icon: Icon, message }: any) => (
-  <div className="text-center py-12 bg-gray-50 rounded-lg">
-    <Icon className="w-12 h-12 text-gray-400 mx-auto mb-3" />
-    <p className="text-gray-500">{message}</p>
-  </div>
-);

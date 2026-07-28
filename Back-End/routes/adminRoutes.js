@@ -25,6 +25,10 @@ const {
   toggleLoanPolicy,
   // Stats
   getDashboardStats,
+  // Fraud
+  getUnresolvedFraud,
+  getAllFraud,
+  resolveFraud,
 } = require('../controllers/adminController');
 
 const { verifyToken, isAdmin } = require('../middlewares/authMiddleware');
@@ -66,5 +70,12 @@ router.get('/loan-policies', getLoanPolicies);
 router.post('/loan-policies', createLoanPolicy);
 router.put('/loan-policies/:policyId', updateLoanPolicy);
 router.put('/loan-policies/:policyId/toggle', toggleLoanPolicy);
+
+// ----------------------------------------------------------------
+// FRAUD MANAGEMENT
+// ----------------------------------------------------------------
+router.get('/fraud', getUnresolvedFraud);
+router.get('/fraud/all', getAllFraud);
+router.put('/fraud/:fraudId/resolve', resolveFraud);
 
 module.exports = router;

@@ -10,11 +10,13 @@ import {
   LogOut, Building2, Plus, ArrowUpRight, ArrowDownLeft,
   Send, FileText, CreditCard, Wallet, TrendingUp, Clock,
   CheckCircle, XCircle, AlertCircle, Home, Car, GraduationCap,
-  Heart, Briefcase, Stethoscope, RefreshCw, User, Calendar, ChevronUp
+  Heart, Briefcase, Stethoscope, RefreshCw, User, Calendar, ChevronUp,
+  MessageSquare, X,
 } from "lucide-react";
 import ProfileModal from "../components/ProfileModal";
 import StatementDownload from "../components/StatementDownload";
 import { Toast, useToast } from "../components/Toast";
+import { supportService } from "../services/support";
 
 // ── POLICY MAP ────────────────────────────────────────────────────
 const LOAN_POLICY_MAP: Record<string, number> = {
@@ -39,6 +41,26 @@ interface Repayment {
   paid_date: string | null;
   status: "PENDING" | "PAID" | "OVERDUE" | string;
   is_overdue?: boolean;
+}
+
+interface TicketReply {
+  reply_id: number;
+  sender_type: "CUSTOMER" | "STAFF" | "ADMIN";
+  sender_name?: string;
+  message: string;
+  created_at: string;
+}
+
+interface SupportTicket {
+  ticket_id: number;
+  subject: string;
+  description: string;
+  category: string;
+  status: "OPEN" | "IN_PROGRESS" | "RESOLVED" | "CLOSED";
+  priority: "LOW" | "MEDIUM" | "HIGH";
+  created_at: string;
+  assigned_to_name: string | null;
+  replies?: TicketReply[];
 }
 
 // ── HELPER COMPONENTS (defined BEFORE main component to avoid scoping issues) ──
@@ -70,7 +92,7 @@ export default function CustomerDashboard() {
   const { user, logout } = useAuth();
   const { toasts, removeToast, toast } = useToast();
 
-  const [activeTab, setActiveTab] = useState<"accounts" | "transactions" | "loans">("accounts");
+  const [activeTab, setActiveTab] = useState<"accounts" | "transactions" | "loans" | "tickets">("accounts");
   const [loading, setLoading] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
 
@@ -102,6 +124,14 @@ export default function CustomerDashboard() {
   const [loadingScheduleId, setLoadingScheduleId] = useState<number | null>(null);
 
   const [selectedRepaymentIds, setSelectedRepaymentIds] = useState<Record<number, Set<number>>>({});
+
+  // Support Tickets
+  const [tickets, setTickets] = useState<SupportTicket[]>([]);
+  const [selectedTicket, setSelectedTicket] = useState<SupportTicket | null>(null);
+  const [showNewTicketForm, setShowNewTicketForm] = useState(false);
+  const [newTicketForm, setNewTicketForm] = useState({ subject: "", description: "", category: "GENERAL", priority: "MEDIUM" });
+  const [ticketReplyText, setTicketReplyText] = useState("");
+  const [ticketBusy, setTicketBusy] = useState(false);
 
   // ── HELPERS ──────────────────────────────────────────────────────
   const getLoanIcon = (loanType: string) => {
@@ -135,6 +165,16 @@ export default function CustomerDashboard() {
       case "closed": return { bg: "bg-gray-100", text: "text-gray-700", icon: <CheckCircle className="w-4 h-4" /> };
       case "defaulted": return { bg: "bg-red-200", text: "text-red-800", icon: <XCircle className="w-4 h-4" /> };
       case "closure_pending": return { bg: "bg-orange-100", text: "text-orange-700", icon: <Clock className="w-4 h-4" /> };
+      default: return { bg: "bg-gray-100", text: "text-gray-700", icon: <AlertCircle className="w-4 h-4" /> };
+    }
+  };
+
+  const getTicketStatusBadge = (status: string = "") => {
+    switch (status.toUpperCase()) {
+      case "OPEN": return { bg: "bg-blue-100", text: "text-blue-700", icon: <Clock className="w-4 h-4" /> };
+      case "IN_PROGRESS": return { bg: "bg-yellow-100", text: "text-yellow-700", icon: <RefreshCw className="w-4 h-4" /> };
+      case "RESOLVED": return { bg: "bg-green-100", text: "text-green-700", icon: <CheckCircle className="w-4 h-4" /> };
+      case "CLOSED": return { bg: "bg-gray-100", text: "text-gray-700", icon: <XCircle className="w-4 h-4" /> };
       default: return { bg: "bg-gray-100", text: "text-gray-700", icon: <AlertCircle className="w-4 h-4" /> };
     }
   };
@@ -193,6 +233,11 @@ export default function CustomerDashboard() {
         setTransactions((txRes as any).transactions || []);
         setFilteredTransactions((txRes as any).transactions || []);
       }
+
+      if (activeTab === "tickets") {
+        const ticketRes = await supportService.getMine();
+        setTickets(Array.isArray(ticketRes) ? ticketRes : (ticketRes as any).tickets || []);
+      }
     } catch (_) { }
   };
 
@@ -237,14 +282,61 @@ export default function CustomerDashboard() {
     finally { setLoading(false); }
   };
 
+  const loadTickets = async () => {
+    setLoading(true);
+    try {
+      const response = await supportService.getMine();
+      setTickets(Array.isArray(response) ? response : (response as any).tickets || []);
+    } catch (err) { console.error("Failed to load tickets:", err); }
+    finally { setLoading(false); }
+  };
+
+  const openTicket = async (ticketId: number) => {
+    try { setSelectedTicket(await supportService.getById(ticketId) as any); }
+    catch (err: any) { toast.error(err.message || "Failed to load ticket."); }
+  };
+
+  const refreshSelectedTicket = async () => {
+    await loadTickets();
+    if (selectedTicket) setSelectedTicket(await supportService.getById(selectedTicket.ticket_id) as any);
+  };
+
+  const handleCreateTicket = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTicketForm.subject.trim() || !newTicketForm.description.trim()) {
+      return toast.error("Subject and description are required.");
+    }
+    setTicketBusy(true);
+    try {
+      await supportService.create(newTicketForm);
+      toast.success("Ticket submitted. Support will respond shortly.");
+      setNewTicketForm({ subject: "", description: "", category: "GENERAL", priority: "MEDIUM" });
+      setShowNewTicketForm(false);
+      loadTickets();
+    } catch (err: any) { toast.error(err.message || "Failed to submit ticket."); }
+    finally { setTicketBusy(false); }
+  };
+
+  const handleTicketReply = async () => {
+    if (!selectedTicket || !ticketReplyText.trim()) return;
+    setTicketBusy(true);
+    try {
+      await supportService.reply(selectedTicket.ticket_id, ticketReplyText.trim());
+      setTicketReplyText("");
+      await refreshSelectedTicket();
+    } catch (err: any) { toast.error(err.message || "Failed to send reply."); }
+    finally { setTicketBusy(false); }
+  };
+
   const fetchAllData = async () => {
     await loadAccounts();
     if (activeTab === "transactions" && selectedAccount) await loadTransactions();
     else if (activeTab === "loans") await loadLoans();
+    else if (activeTab === "tickets") await loadTickets();
   };
 
   const anyModalOpenCustomer =
-    showCreateAccount || showWithdraw || showTransfer || showLoanForm || showProfileModal;
+    showCreateAccount || showWithdraw || showTransfer || showLoanForm || showProfileModal || !!selectedTicket || showNewTicketForm;
 
   usePolling(silentRefreshAll, { intervalMs: 5000, paused: anyModalOpenCustomer });
 
@@ -254,6 +346,7 @@ export default function CustomerDashboard() {
   useEffect(() => {
     if (activeTab === "transactions" && selectedAccount) loadTransactions();
     else if (activeTab === "loans") loadLoans();
+    else if (activeTab === "tickets") loadTickets();
   }, [activeTab, selectedAccount]);
 
   // ── ACTION HANDLERS ───────────────────────────────────────────────
@@ -515,7 +608,8 @@ export default function CustomerDashboard() {
               { id: "accounts", label: `My Accounts (${visibleAccounts.length})`, icon: Building2 },
               { id: "transactions", label: "Transactions", icon: ArrowDownLeft },
               { id: "loans", label: `Loans (${loans.length})`, icon: FileText },
-            ] as { id: "accounts" | "transactions" | "loans"; label: string; icon: React.ElementType }[]).map(tab => (
+              { id: "tickets", label: `Support (${tickets.length})`, icon: MessageSquare },
+            ] as { id: "accounts" | "transactions" | "loans" | "tickets"; label: string; icon: React.ElementType }[]).map(tab => (
               <button key={tab.id} onClick={() => setActiveTab(tab.id)}
                 className={`flex-1 px-6 py-4 font-medium transition ${activeTab === tab.id ? "text-blue-600 border-b-2 border-blue-600" : "text-gray-600 hover:text-gray-900"}`}>
                 <div className="flex items-center justify-center space-x-2">
@@ -741,6 +835,12 @@ export default function CustomerDashboard() {
                                           </span>
                                         </div>
                                         <p className="text-sm text-gray-800 mt-2 mb-2 pl-7">{t.description || t.transaction_reason || "Transaction"}</p>
+                                        {t.is_fraud === 1 && (
+                                          <div className="ml-7 mt-1 mb-2 flex items-center gap-1 text-xs text-red-600 font-medium">
+                                            <AlertCircle className="w-3 h-3" />
+                                            This transaction has been flagged for review
+                                          </div>
+                                        )}
                                         <div className="flex justify-between items-center mt-2 pt-2 border-t border-gray-100">
                                           <p className="text-xs text-gray-400">Transaction ID: {t.id}</p>
                                           {t.running_balance !== undefined && (
@@ -990,12 +1090,132 @@ export default function CustomerDashboard() {
               </div>
             )}
 
+            {/* ── SUPPORT TICKETS TAB ── */}
+            {activeTab === "tickets" && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-gray-900">Support Tickets</h3>
+                  <button onClick={() => setShowNewTicketForm(v => !v)}
+                    className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium">
+                    <Plus className="w-4 h-4" /> New Ticket
+                  </button>
+                </div>
+
+                {showNewTicketForm && (
+                  <form onSubmit={handleCreateTicket} className="bg-white rounded-xl shadow-sm border p-4 space-y-3">
+                    <input type="text" placeholder="Subject" value={newTicketForm.subject}
+                      onChange={e => setNewTicketForm(p => ({ ...p, subject: e.target.value }))}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+                    <textarea placeholder="Describe the issue" rows={4} value={newTicketForm.description}
+                      onChange={e => setNewTicketForm(p => ({ ...p, description: e.target.value }))}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm resize-none" />
+                    <div className="flex gap-3">
+                      <select value={newTicketForm.category} onChange={e => setNewTicketForm(p => ({ ...p, category: e.target.value }))}
+                        className="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                        <option value="GENERAL">General</option>
+                        <option value="ACCOUNT">Account</option>
+                        <option value="TRANSACTION">Transaction</option>
+                        <option value="LOAN">Loan</option>
+                      </select>
+                      <select value={newTicketForm.priority} onChange={e => setNewTicketForm(p => ({ ...p, priority: e.target.value }))}
+                        className="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                        <option value="LOW">Low</option>
+                        <option value="MEDIUM">Medium</option>
+                        <option value="HIGH">High</option>
+                      </select>
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <button type="button" onClick={() => setShowNewTicketForm(false)} className="px-3 py-1.5 text-sm text-gray-600">Cancel</button>
+                      <button type="submit" disabled={ticketBusy} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50">
+                        {ticketBusy ? "Submitting…" : "Submit Ticket"}
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {tickets.length === 0 ? (
+                  <div className="text-center py-12 bg-white rounded-xl shadow-sm border">
+                    <MessageSquare className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+                    <p className="text-gray-500">You haven't submitted any tickets yet</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {tickets.map(t => {
+                      const badge = getTicketStatusBadge(t.status);
+                      return (
+                        <button key={t.ticket_id} onClick={() => openTicket(t.ticket_id)}
+                          className="w-full text-left bg-white rounded-xl shadow-sm border p-4 hover:shadow-md transition">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="font-semibold text-gray-900 truncate">{t.subject}</p>
+                              <p className="text-xs text-gray-500 mt-0.5">
+                                {t.category} · {new Date(t.created_at).toLocaleDateString("en-PK")}
+                                {t.assigned_to_name ? ` · ${t.assigned_to_name}` : ""}
+                              </p>
+                            </div>
+                            <span className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium flex-shrink-0 ${badge.bg} ${badge.text}`}>
+                              {badge.icon}{t.status}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
           </div>
         )}
       </div>
 
       {/* ── MODALS ── */}
       <ProfileModal isOpen={showProfileModal} onClose={() => setShowProfileModal(false)} user={user} onProfileUpdate={loadAccounts} />
+
+      {selectedTicket && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col">
+            <div className="flex items-start justify-between p-6 border-b">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">{selectedTicket.subject}</h3>
+                <p className="text-sm text-gray-500 mt-0.5">{selectedTicket.category} · #{selectedTicket.ticket_id}</p>
+                {(() => {
+                  const badge = getTicketStatusBadge(selectedTicket.status);
+                  return (
+                    <span className={`inline-flex items-center gap-1 px-2 py-1 text-xs rounded-full mt-2 ${badge.bg} ${badge.text}`}>
+                      {badge.icon} {selectedTicket.status.replace("_", " ")}
+                    </span>
+                  );
+                })()}
+              </div>
+              <button onClick={() => setSelectedTicket(null)} className="p-2 hover:bg-gray-100 rounded-lg">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-3">
+              <p className="text-sm text-gray-700">{selectedTicket.description}</p>
+              <hr />
+              {(selectedTicket.replies || []).map(r => (
+                <div key={r.reply_id} className="text-sm bg-gray-50 rounded-lg p-3">
+                  <p className="font-medium text-gray-900">{r.sender_type === "CUSTOMER" ? "You" : (r.sender_name || "Support")}</p>
+                  <p className="text-gray-700 mt-0.5">{r.message}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="p-6 border-t space-y-3">
+              <textarea rows={2} value={ticketReplyText} onChange={e => setTicketReplyText(e.target.value)}
+                placeholder="Write a reply…"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm resize-none focus:ring-2 focus:ring-blue-400" />
+              <button onClick={handleTicketReply} disabled={ticketBusy || !ticketReplyText.trim()}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50">
+                <Send className="w-4 h-4" /> {ticketBusy ? "Sending…" : "Send reply"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Create Account Modal */}
       {showCreateAccount && (
