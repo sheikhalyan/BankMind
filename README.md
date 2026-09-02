@@ -295,21 +295,6 @@ All endpoints are grouped under `/api` and protected according to their role and
 | **Support** | `/api/support-tickets` | Ticket creation, assignment, replies, filters, and status updates |
 | **AI chat** | `/api/ai-chat` | Chat sessions, messages, and grounded AI responses |
 
-### Development-only repayment trigger
-
-The project includes an endpoint used to test automatic deductions:
-
-```http
-POST /api/loan-repayments/test-auto-deduct
-Content-Type: application/json
-
-{
-  "force": true
-}
-```
-
-> [!WARNING]
-> Restrict or remove this endpoint before production deployment.
 
 <br>
 
