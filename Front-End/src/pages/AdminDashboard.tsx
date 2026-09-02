@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect } from "react";
 import { useAuth } from "../context/AuthContext";
 import { adminService } from "../services/admin";
 import { loanService } from "../services/loan";
@@ -10,7 +10,7 @@ import {
   FileText, BarChart2, Plus, Shield, Edit2, Save, X,
   ChevronDown, ChevronUp, CreditCard, Calendar, ToggleLeft, ToggleRight,
   TrendingUp, Users, DollarSign, Activity, ShieldAlert, Banknote,
-  Eye, Lock, Unlock, MessageSquare, Send,
+  Eye, Lock, MessageSquare, Send,
 } from "lucide-react";
 import NotificationBell from "../components/NotificationBell";
 import ProfileModal from "../components/ProfileModal";

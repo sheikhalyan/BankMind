@@ -39,10 +39,11 @@ app.use('/api/loans', require('./routes/loanRoutes'));
 app.use('/api/loan-repayments', require('./routes/Loanrepaymentroutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
 app.use('/api/support', require('./routes/supportticketRoutes'));
+app.use('/api/chat', require('./routes/aichatRoutes'));
 
 // Uncomment as you build these:
 // app.use('/api/fraud',            require('./routes/fraudRoutes'));
-// app.use('/api/chat',             require('./routes/aiChatRoutes'));
+
 
 
 /* -------------------- 404 HANDLER -------------------- */

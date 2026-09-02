@@ -5,6 +5,7 @@ import { transactionService } from "../services/transaction";
 import { loanService } from "../services/loan";
 import NotificationBell from "../components/NotificationBell";
 import { Account, Transaction, LoanRequest } from "../types";
+import AiChatBubble from "../components/AichatBubble";
 import { usePolling } from "../hooks/usePolling";
 import {
   LogOut, Building2, Plus, ArrowUpRight, ArrowDownLeft,
@@ -1473,6 +1474,7 @@ export default function CustomerDashboard() {
           </div>
         </div>
       )}
+      <AiChatBubble />
 
     </div>
   );
